@@ -3,48 +3,46 @@ import random
 import time
 from pynput import mouse, keyboard
 
-# ─── Configuración principal ──────────────────────────────────────────────────
-TIEMPO_INACTIVIDAD   = 120  # segundos de inactividad antes de mover el mouse
-INTERVALO_MOVIMIENTO = 5    # segundos entre movimientos cuando está inactivo
-DISTANCIA_MOVIMIENTO = 20   # píxeles máximos del nudge
+# Main configuration
+IDLE_TIME_SECONDS = 120  # Idle time threshold before nudging the mouse
+MOVE_INTERVAL_SECONDS = 5  # Seconds between nudges while idle
+MOVE_DISTANCE_PIXELS = 20  # Maximum nudge distance in pixels
 
-# ─── Horario laboral (el script se cierra solo fuera de este rango) ───────────
-HORA_INICIO = (7,  0)   # 7:00 AM
-HORA_FIN    = (18, 0)   # 6:00 PM
-DIAS_LABORALES = {0, 1, 2, 3, 4}  # 0=lunes … 4=viernes
+# Work schedule (the script exits outside this window)
+WORK_START_TIME = (7, 0)  # 7:00 AM
+WORK_END_TIME = (18, 0)  # 6:00 PM
+WORK_DAYS = {0, 1, 2, 3, 4}  # 0=Monday ... 4=Friday
 
-# ─── Pausa de almuerzo ────────────────────────────────────────────────────────
-HORA_ALMUERZO    = (12, 30)  # inicio del almuerzo (hora, minuto)
-DURACION_ALMUERZO = 60       # duración en minutos
+# Lunch break
+LUNCH_START_TIME = (12, 30)  # Lunch start time (hour, minute)
+LUNCH_DURATION_MINUTES = 60  # Lunch duration in minutes
 
-# ─── Logging ──────────────────────────────────────────────────────────────────
-INTERVALO_LOG = 60  # imprimir mensajes de estado como máximo cada N segundos
+# Logging
+LOG_INTERVAL_SECONDS = 60  # Print repeated status messages at most every N seconds
 
-# ──────────────────────────────────────────────────────────────────────────────
-
-screenWidth, screenHeight = pyautogui.size()
+screen_width, screen_height = pyautogui.size()
 
 
-def minutos_del_dia():
-    """Minutos transcurridos desde medianoche."""
+def minutes_since_midnight():
+    """Return minutes elapsed since midnight."""
     t = time.localtime()
     return t.tm_hour * 60 + t.tm_min
 
 
-def es_horario_laboral():
+def is_work_hours():
     t = time.localtime()
-    if t.tm_wday not in DIAS_LABORALES:
+    if t.tm_wday not in WORK_DAYS:
         return False
-    minutos = minutos_del_dia()
-    inicio = HORA_INICIO[0] * 60 + HORA_INICIO[1]
-    fin    = HORA_FIN[0]    * 60 + HORA_FIN[1]
-    return inicio <= minutos < fin
+    current_minutes = minutes_since_midnight()
+    start_minutes = WORK_START_TIME[0] * 60 + WORK_START_TIME[1]
+    end_minutes = WORK_END_TIME[0] * 60 + WORK_END_TIME[1]
+    return start_minutes <= current_minutes < end_minutes
 
 
-def es_hora_almuerzo():
-    inicio = HORA_ALMUERZO[0] * 60 + HORA_ALMUERZO[1]
-    fin    = inicio + DURACION_ALMUERZO
-    return inicio <= minutos_del_dia() < fin
+def is_lunch_time():
+    start_minutes = LUNCH_START_TIME[0] * 60 + LUNCH_START_TIME[1]
+    end_minutes = start_minutes + LUNCH_DURATION_MINUTES
+    return start_minutes <= minutes_since_midnight() < end_minutes
 
 
 class ActivityWatcher:
@@ -71,16 +69,16 @@ class ActivityWatcher:
         return time.time() - self.last_activity_time
 
     def reset_idle(self):
-        """Reinicia el contador de inactividad (p.ej. al salir del almuerzo)."""
+        """Reset idle timer (for example, when lunch break ends)."""
         self.last_activity_time = time.time()
 
     def nudge_mouse(self):
-        """Mueve el cursor levemente y lo regresa a la posición original."""
+        """Move the cursor slightly and return it to its original position."""
         origin_x, origin_y = pyautogui.position()
-        offset_x = random.randint(-DISTANCIA_MOVIMIENTO, DISTANCIA_MOVIMIENTO)
-        offset_y = random.randint(-DISTANCIA_MOVIMIENTO, DISTANCIA_MOVIMIENTO)
-        target_x = max(0, min(screenWidth  - 1, origin_x + offset_x))
-        target_y = max(0, min(screenHeight - 1, origin_y + offset_y))
+        offset_x = random.randint(-MOVE_DISTANCE_PIXELS, MOVE_DISTANCE_PIXELS)
+        offset_y = random.randint(-MOVE_DISTANCE_PIXELS, MOVE_DISTANCE_PIXELS)
+        target_x = max(0, min(screen_width - 1, origin_x + offset_x))
+        target_y = max(0, min(screen_height - 1, origin_y + offset_y))
 
         self._bot_moving = True
         try:
@@ -92,75 +90,84 @@ class ActivityWatcher:
 
 
 class ThrottledLogger:
-    """Imprime un mensaje sólo si pasaron al menos INTERVALO_LOG segundos desde el último."""
-    def __init__(self, intervalo=INTERVALO_LOG):
-        self._intervalo = intervalo
-        self._last_msg  = {}
+    """Print a message only if at least LOG_INTERVAL_SECONDS elapsed since the previous one."""
 
-    def log(self, key, mensaje):
-        ahora = time.time()
-        if ahora - self._last_msg.get(key, 0) >= self._intervalo:
-            print(mensaje)
-            self._last_msg[key] = ahora
+    def __init__(self, interval=LOG_INTERVAL_SECONDS):
+        self._interval = interval
+        self._last_msg = {}
+
+    def log(self, key, message):
+        now = time.time()
+        if now - self._last_msg.get(key, 0) >= self._interval:
+            print(message)
+            self._last_msg[key] = now
 
 
 def main():
-
-    # ─── Inicio ───────────────────────────────────────────────────────────────────
+    # Startup
 
     watcher = ActivityWatcher()
-    logger  = ThrottledLogger()
+    logger = ThrottledLogger()
 
     print("=" * 55)
-    print("  Bot iniciado")
-    print(f"  Horario: lun-vie {HORA_INICIO[0]:02d}:{HORA_INICIO[1]:02d} -> {HORA_FIN[0]:02d}:{HORA_FIN[1]:02d}")
-    print(f"  Almuerzo: {HORA_ALMUERZO[0]:02d}:{HORA_ALMUERZO[1]:02d} por {DURACION_ALMUERZO} min")
-    print(f"  Inactividad umbral: {TIEMPO_INACTIVIDAD}s  |  Intervalo nudge: {INTERVALO_MOVIMIENTO}s")
+    print("  Bot started")
+    print(
+        f"  Work hours: Mon-Fri {WORK_START_TIME[0]:02d}:{WORK_START_TIME[1]:02d} -> "
+        f"{WORK_END_TIME[0]:02d}:{WORK_END_TIME[1]:02d}"
+    )
+    print(
+        f"  Lunch break: {LUNCH_START_TIME[0]:02d}:{LUNCH_START_TIME[1]:02d} "
+        f"for {LUNCH_DURATION_MINUTES} min"
+    )
+    print(
+        f"  Idle threshold: {IDLE_TIME_SECONDS}s  |  "
+        f"Nudge interval: {MOVE_INTERVAL_SECONDS}s"
+    )
     print("=" * 55)
 
-    _en_almuerzo = False  # para detectar la transicion salida-de-almuerzo
+    in_lunch_break = False  # Detect transition out of lunch break
 
     try:
         while True:
-            # 1. Fuera de horario laboral: terminar el proceso
-            if not es_horario_laboral():
-                print("Fuera de horario laboral. Bot terminado.")
+            # 1. Outside work hours: stop the process
+            if not is_work_hours():
+                print("Outside work hours. Bot stopped.")
                 break
 
-            # 2. Hora de almuerzo
-            if es_hora_almuerzo():
-                if not _en_almuerzo:
-                    print("Inicio de almuerzo detectado. Previniendo bloqueo de pantalla...")
-                    _en_almuerzo = True
+            # 2. Lunch break
+            if is_lunch_time():
+                if not in_lunch_break:
+                    print("Lunch break started. Preventing screen lock...")
+                    in_lunch_break = True
 
-                # Nudge silencioso para evitar que la pantalla se bloquee
+                # Silent nudge to keep the screen awake
                 watcher.nudge_mouse()
-                logger.log("almuerzo", "  [almuerzo] Pantalla mantenida activa.")
-                time.sleep(INTERVALO_MOVIMIENTO)
+                logger.log("lunch", "  [lunch] Screen kept active.")
+                time.sleep(MOVE_INTERVAL_SECONDS)
 
-            # 3. Regreso del almuerzo: reiniciar contador
-            elif _en_almuerzo:
-                print("Fin del almuerzo. Reiniciando contador de inactividad.")
+            # 3. Returning from lunch: reset idle timer
+            elif in_lunch_break:
+                print("Lunch break ended. Resetting idle timer.")
                 watcher.reset_idle()
-                _en_almuerzo = False
+                in_lunch_break = False
                 time.sleep(1)
 
-            # 4. Inactividad normal: nudge
-            elif watcher.get_idle_time() >= TIEMPO_INACTIVIDAD:
+            # 4. Normal inactivity: nudge
+            elif watcher.get_idle_time() >= IDLE_TIME_SECONDS:
                 watcher.nudge_mouse()
                 logger.log(
                     "nudge",
-                    f"  [inactivo {int(watcher.get_idle_time())}s] Cursor movido y regresado."
+                    f"  [idle {int(watcher.get_idle_time())}s] Cursor moved and restored."
                 )
-                time.sleep(INTERVALO_MOVIMIENTO)
+                time.sleep(MOVE_INTERVAL_SECONDS)
 
-            # 5. Usuario activo
+            # 5. User is active
             else:
-                logger.log("activo", "  [activo] Usuario detectado.")
+                logger.log("active", "  [active] User activity detected.")
                 time.sleep(1)
 
     except KeyboardInterrupt:
-        print("\nPrograma detenido manualmente.")
+        print("\nProgram stopped manually.")
         return 130
 
     return 0
