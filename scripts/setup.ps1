@@ -72,6 +72,17 @@ function Task-Exists {
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
+function Get-WorkStart {
+    # Read WORK_START_TIME from conf/config.yaml via Python — single source of truth.
+    # Returns a string like "07:00" suitable for New-ScheduledTaskTrigger -At.
+    $uvPath = Get-UvPath
+    $result = & $uvPath run --project $ProjectRoot python -c @'
+from deskghost.config import WORK_START_TIME
+print(f"{WORK_START_TIME[0]:02d}:{WORK_START_TIME[1]:02d}")
+'@
+    return $result.Trim()
+}
+
 function Invoke-Install {
     $uvPath = Get-UvPath
     Assert-ProjectRoot
@@ -94,16 +105,9 @@ function Invoke-Install {
         -Argument "/c $cmdLine" `
         -WorkingDirectory $ProjectRoot
 
-    # Trigger: Mon–Fri at 07:00
-    $days = @(
-        [Microsoft.Win32.TaskScheduler.DaysOfWeek]::Monday,
-        [Microsoft.Win32.TaskScheduler.DaysOfWeek]::Tuesday,
-        [Microsoft.Win32.TaskScheduler.DaysOfWeek]::Wednesday,
-        [Microsoft.Win32.TaskScheduler.DaysOfWeek]::Thursday,
-        [Microsoft.Win32.TaskScheduler.DaysOfWeek]::Friday
-    )
-    # Use the COM-based approach compatible with PS 5.1+
-    $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "07:00"
+    # Trigger: weekdays at work_start time (read from conf/config.yaml)
+    $workStart = Get-WorkStart
+    $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At $workStart
 
     # Settings: run only when user is logged on, limited privilege (no elevation)
     $settings = New-ScheduledTaskSettingsSet `
@@ -129,7 +133,7 @@ function Invoke-Install {
     Write-Green "  uv        : $uvPath"
     Write-Green "  project   : $ProjectRoot"
     Write-Green "  logs      : $LogDir"
-    Write-Green "DeskGhost will start automatically at 07:00 Mon-Fri."
+    Write-Green "DeskGhost will start automatically at $workStart Mon-Fri."
     Write-Yellow "To test right now run:  .\scripts\setup.ps1 run-now"
 }
 

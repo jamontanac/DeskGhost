@@ -1,7 +1,7 @@
 import sys
 import time
 
-from deskghost.logger import ThrottledLogger, get_logger
+from deskghost.logger import ThrottledLogger, configure_file_logging, get_logger
 from deskghost.schedule import (
     IDLE_TIME_SECONDS,
     LUNCH_DURATION_MINUTES,
@@ -21,6 +21,7 @@ else:
 
 def main() -> int:
     log = get_logger()
+    log_file = configure_file_logging()
     throttled = ThrottledLogger()
     watcher = ActivityWatcher()
 
@@ -40,6 +41,7 @@ def main() -> int:
         f"Nudge interval : {MOVE_INTERVAL_SECONDS}s"
     )
     log.info(f"  Platform : {sys.platform}")
+    log.info(f"  Log file : {log_file}")
     log.info("=" * 55)
 
     in_lunch = False

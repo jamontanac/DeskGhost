@@ -1,18 +1,32 @@
 import time
 
-# Idle / nudge behaviour
-IDLE_TIME_SECONDS = 120       # seconds idle before nudging starts
-MOVE_INTERVAL_SECONDS = 5     # seconds between nudges while idle
-MOVE_DISTANCE_PIXELS = 20     # maximum nudge offset in any direction
+from deskghost.config import (
+    IDLE_TIME_SECONDS,
+    LUNCH_DURATION_MINUTES,
+    LUNCH_START_TIME,
+    MOVE_DISTANCE_PIXELS,
+    MOVE_INTERVAL_SECONDS,
+    SEND_KEYSTROKES,
+    WORK_DAYS,
+    WORK_END_TIME,
+    WORK_START_TIME,
+)
 
-# Work schedule
-WORK_START_TIME = (7, 0)      # (hour, minute) — 07:00
-WORK_END_TIME = (18, 0)       # (hour, minute) — 18:00
-WORK_DAYS = {0, 1, 2, 3, 4}  # 0=Monday … 4=Friday
-
-# Lunch break
-LUNCH_START_TIME = (12, 30)   # (hour, minute)
-LUNCH_DURATION_MINUTES = 60
+# Re-export so existing imports of these names from deskghost.schedule keep working.
+__all__ = [
+    "IDLE_TIME_SECONDS",
+    "MOVE_INTERVAL_SECONDS",
+    "MOVE_DISTANCE_PIXELS",
+    "WORK_START_TIME",
+    "WORK_END_TIME",
+    "WORK_DAYS",
+    "LUNCH_START_TIME",
+    "LUNCH_DURATION_MINUTES",
+    "SEND_KEYSTROKES",
+    "minutes_since_midnight",
+    "is_work_hours",
+    "is_lunch_time",
+]
 
 
 def minutes_since_midnight() -> int:

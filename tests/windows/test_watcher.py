@@ -19,8 +19,14 @@ SCREEN_W, SCREEN_H = 1920, 1080
 _ES_CONTINUOUS = 0x80000000
 _ES_SYSTEM_REQUIRED = 0x00000001
 _ES_DISPLAY_REQUIRED = 0x00000002
-_VK_CTRL = 0x11
-_VK_SHIFT = 0x10
+_VK_CTRL        = 0x11
+_VK_SHIFT       = 0x10
+_VK_ALT         = 0x12
+_VK_SCROLL_LOCK = 0x91
+_VK_F13         = 0x7C
+_VK_F14         = 0x7D
+_VK_F15         = 0x7E
+_SAFE_KEYS      = [_VK_CTRL, _VK_SHIFT, _VK_ALT, _VK_SCROLL_LOCK, _VK_F13, _VK_F14, _VK_F15]
 _KEYEVENTF_KEYUP = 0x0002
 
 
@@ -196,14 +202,24 @@ class TestNudgeMouse:
             w.nudge_mouse()
         assert w._bot_moving is False
 
-    def test_nudge_calls_press_random_key(self):
+    def test_nudge_calls_press_random_key_when_send_keystrokes_true(self):
         fake_ctypes, user32, _ = _make_fake_ctypes()
         fake_pynput, _ = _make_fake_pynput()
         Watcher = _import_watcher(fake_ctypes, fake_pynput)
         w = Watcher()
-        w.nudge_mouse()
+        with patch("deskghost.windows.watcher.SEND_KEYSTROKES", True):
+            w.nudge_mouse()
         # keybd_event must be called exactly twice: key-down + key-up
         assert user32.keybd_event.call_count == 2
+
+    def test_nudge_skips_press_random_key_when_send_keystrokes_false(self):
+        fake_ctypes, user32, _ = _make_fake_ctypes()
+        fake_pynput, _ = _make_fake_pynput()
+        Watcher = _import_watcher(fake_ctypes, fake_pynput)
+        w = Watcher()
+        with patch("deskghost.windows.watcher.SEND_KEYSTROKES", False):
+            w.nudge_mouse()
+        assert user32.keybd_event.call_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -211,17 +227,17 @@ class TestNudgeMouse:
 # ---------------------------------------------------------------------------
 
 class TestPressRandomKey:
-    def test_press_random_key_uses_ctrl_or_shift(self):
+    def test_press_random_key_uses_key_from_safe_pool(self):
         fake_ctypes, user32, _ = _make_fake_ctypes()
         fake_pynput, _ = _make_fake_pynput()
         Watcher = _import_watcher(fake_ctypes, fake_pynput)
         w = Watcher()
-        for _ in range(20):
+        for _ in range(30):
             user32.keybd_event.reset_mock()
             w._press_random_key()
             down_call = user32.keybd_event.call_args_list[0]
             vk = down_call[0][0]
-            assert vk in (_VK_CTRL, _VK_SHIFT), f"Unexpected VK code: {vk}"
+            assert vk in _SAFE_KEYS, f"Unexpected VK code: {hex(vk)}"
 
     def test_press_random_key_sends_keydown_then_keyup(self):
         fake_ctypes, user32, _ = _make_fake_ctypes()

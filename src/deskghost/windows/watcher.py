@@ -4,7 +4,7 @@ import time
 
 from pynput import keyboard, mouse
 
-from deskghost.schedule import MOVE_DISTANCE_PIXELS
+from deskghost.schedule import MOVE_DISTANCE_PIXELS, SEND_KEYSTROKES
 
 # SetThreadExecutionState flags
 _ES_CONTINUOUS = 0x80000000
@@ -12,8 +12,22 @@ _ES_SYSTEM_REQUIRED = 0x00000001
 _ES_DISPLAY_REQUIRED = 0x00000002
 
 # Virtual-key codes
-_VK_CTRL = 0x11
-_VK_SHIFT = 0x10
+# All are modifier / function keys that produce no visible character or UI
+# effect, but register as user input — resetting Teams' idle timer.
+#   Ctrl, Shift, Alt      — standard modifiers
+#   Scroll Lock           — virtually unused, harmless toggle
+#   F13, F14, F15         — exist in the VK table, nothing is bound to them
+#                           by default on standard Windows keyboards
+_VK_CTRL        = 0x11
+_VK_SHIFT       = 0x10
+_VK_ALT         = 0x12
+_VK_SCROLL_LOCK = 0x91
+_VK_F13         = 0x7C
+_VK_F14         = 0x7D
+_VK_F15         = 0x7E
+
+_SAFE_KEYS = [_VK_CTRL, _VK_SHIFT, _VK_ALT, _VK_SCROLL_LOCK, _VK_F13, _VK_F14, _VK_F15]
+
 _KEYEVENTF_KEYUP = 0x0002
 
 # Interpolation steps for smooth cursor movement
@@ -80,14 +94,20 @@ class ActivityWatcher:
             time.sleep(_STEP_SLEEP)
 
     def _press_random_key(self) -> None:
-        """Press and release either Ctrl or Shift, chosen at random."""
-        vk = random.choice([_VK_CTRL, _VK_SHIFT])
+        """Press and release one key chosen at random from the safe pool.
+
+        All keys in ``_SAFE_KEYS`` are modifiers or unbound function keys —
+        they produce no visible character or UI effect but register as user
+        input, resetting Teams' idle timer.  Only called when
+        ``SEND_KEYSTROKES`` is True.
+        """
+        vk = random.choice(_SAFE_KEYS)
         self._user32.keybd_event(vk, 0, 0, 0)                  # key down
         time.sleep(0.05)
         self._user32.keybd_event(vk, 0, _KEYEVENTF_KEYUP, 0)   # key up
 
     def nudge_mouse(self) -> None:
-        """Move the cursor slightly, return it to origin, then tap a key."""
+        """Move the cursor slightly, return it to origin, then optionally tap a key."""
         pt = _POINT()
         self._user32.GetCursorPos(ctypes.byref(pt))
         ox, oy = pt.x, pt.y
@@ -103,7 +123,8 @@ class ActivityWatcher:
         finally:
             self._bot_moving = False
 
-        self._press_random_key()
+        if SEND_KEYSTROKES:
+            self._press_random_key()
 
     def cleanup(self) -> None:
         """Restore normal execution state and stop input listeners."""

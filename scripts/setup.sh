@@ -41,9 +41,23 @@ require_uv() {
     fi
 }
 
+read_work_start() {
+    # Read WORK_START_TIME from conf/config.yaml via Python so we have a single
+    # source of truth.  Outputs two space-separated integers: "<hour> <minute>".
+    "$UV_PATH" run --project "$PROJECT_ROOT" python -c \
+        "from deskghost.config import WORK_START_TIME; print(WORK_START_TIME[0], WORK_START_TIME[1])"
+}
+
 write_plist() {
     mkdir -p "$(dirname "$PLIST_DST")"
     mkdir -p "$LOG_DIR"
+
+    # Read trigger time from config (single source of truth: conf/config.yaml)
+    local work_start
+    work_start="$(read_work_start)"
+    local WORK_HOUR WORK_MINUTE
+    WORK_HOUR="$(echo "$work_start"  | cut -d' ' -f1)"
+    WORK_MINUTE="$(echo "$work_start" | cut -d' ' -f2)"
 
     cat > "$PLIST_DST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -64,14 +78,14 @@ write_plist() {
     <key>WorkingDirectory</key>
     <string>${PROJECT_ROOT}</string>
 
-    <!-- Fire at 07:00 on every weekday -->
+    <!-- Fire at work_start time (read from conf/config.yaml) on every weekday -->
     <key>StartCalendarInterval</key>
     <array>
-        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>${WORK_HOUR}</integer><key>Minute</key><integer>${WORK_MINUTE}</integer></dict>
+        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>${WORK_HOUR}</integer><key>Minute</key><integer>${WORK_MINUTE}</integer></dict>
+        <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>${WORK_HOUR}</integer><key>Minute</key><integer>${WORK_MINUTE}</integer></dict>
+        <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>${WORK_HOUR}</integer><key>Minute</key><integer>${WORK_MINUTE}</integer></dict>
+        <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>${WORK_HOUR}</integer><key>Minute</key><integer>${WORK_MINUTE}</integer></dict>
     </array>
 
     <!-- Do not restart automatically — the script self-exits after work hours -->
@@ -118,7 +132,7 @@ cmd_install() {
     green "  uv        : ${UV_PATH}"
     green "  project   : ${PROJECT_ROOT}"
     green "  logs      : ${LOG_DIR}"
-    green "DeskGhost will start automatically at 07:00 Mon–Fri."
+    green "DeskGhost will start automatically at $(read_work_start | awk '{printf "%02d:%02d", $1, $2}') Mon–Fri."
     yellow "To test right now run:  bash scripts/setup.sh run-now"
 }
 
