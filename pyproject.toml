@@ -1,10 +1,20 @@
 [project]
-name = "bot-test"
+name = "deskghost"
 version = "0.1.0"
-description = "Add your description here"
+description = "Your desk, haunted. DeskGhost silently keeps your presence alive on Teams so you never go grey."
 readme = "README.md"
+authors = [
+    { name = "Jose Alejandro Montana", email = "jamontanac@unal.edu.co" }
+]
 requires-python = ">=3.13"
 dependencies = [
     "pyautogui>=0.9.54",
     "pynput>=1.8.1",
 ]
+
+[project.scripts]
+deskghost = "deskghost:main"
+
+[build-system]
+requires = ["uv_build>=0.9.28,<0.10.0"]
+build-backend = "uv_build"
