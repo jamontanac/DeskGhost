@@ -104,7 +104,7 @@ class ThrottledLogger:
             self._last_msg[key] = ahora
 
 
-if __name__ == "__main__":
+def main():
 
     # ─── Inicio ───────────────────────────────────────────────────────────────────
 
@@ -161,4 +161,11 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
         print("\nPrograma detenido manualmente.")
+        return 130
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
