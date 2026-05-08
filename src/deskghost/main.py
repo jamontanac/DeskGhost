@@ -1,6 +1,7 @@
 import sys
 import time
 
+from deskghost.lock import InstanceLock
 from deskghost.logger import ThrottledLogger, configure_file_logging, get_logger
 from deskghost.schedule import (
     IDLE_TIME_SECONDS,
@@ -20,6 +21,17 @@ else:
 
 
 def main() -> int:
+    with InstanceLock() as lock:
+        if not lock:
+            # Another instance is already running (e.g. machine woke from sleep
+            # while a previous session was still alive, and the scheduler or
+            # login item fired again).  Exit silently — no logging needed since
+            # the running instance is already doing its job.
+            return 0
+        return _run()
+
+
+def _run() -> int:
     log = get_logger()
     log_file = configure_file_logging()
     throttled = ThrottledLogger()
