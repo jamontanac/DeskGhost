@@ -231,6 +231,35 @@ uv run pytest -v       # verbose output
 Platform-specific tests are skipped automatically on the wrong OS — macOS
 watcher tests skip on Windows and vice versa.
 
+### Installation verification tests
+
+`tests/test_install.py` contains a suite of tests that verify the OS-level
+scheduler integration is correctly configured.  These tests **skip
+automatically** when the agent / task has not been installed on the current
+machine, so a clean development environment always produces a clean run.
+
+Once you have run `bash scripts/setup.sh install` (macOS) or
+`scripts\setup.ps1 install` (Windows), the install tests become active and
+check that:
+
+- The plist / scheduled task file exists and is valid.
+- `RunAtLoad` is set (macOS) / a `LogonTrigger` is present (Windows) so
+  DeskGhost starts on every login.
+- The time-based trigger hour and minute match `conf/config.yaml` — no
+  drift if you edit the config and forget to reinstall.
+- The `~/.deskghost/` directory exists and is writable (required for the
+  lock file and logs).
+- The agent is actually loaded in launchctl (macOS).
+
+Run them explicitly at any time to confirm your install is healthy:
+
+```bash
+uv run pytest tests/test_install.py -v
+```
+
+If a test fails it prints a precise message explaining what is wrong and
+which command to re-run to fix it.
+
 ---
 
 ## Security and antivirus considerations
