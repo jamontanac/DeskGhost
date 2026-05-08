@@ -2,9 +2,15 @@
 # =============================================================================
 # setup.sh — DeskGhost macOS installer
 #
-# Registers a launchd LaunchAgent that starts DeskGhost at 07:00 Mon–Fri.
-# The script self-exits when outside work hours, so launchd only needs to
-# kick it off once per day.
+# Registers a launchd LaunchAgent that starts DeskGhost:
+#   • immediately on login/session start (RunAtLoad), AND
+#   • at the configured work-start time Mon–Fri (StartCalendarInterval).
+#
+# DeskGhost self-exits when outside work hours, so a login-time launch
+# outside working hours is harmless.  A PID lock inside the app prevents
+# double-launch when both triggers fire for the same session (e.g. the
+# machine wakes from sleep with DeskGhost already running and the scheduler
+# fires the missed trigger).
 #
 # Usage:
 #   bash scripts/setup.sh install    # register the LaunchAgent
@@ -78,7 +84,11 @@ write_plist() {
     <key>WorkingDirectory</key>
     <string>${PROJECT_ROOT}</string>
 
-    <!-- Fire at work_start time (read from conf/config.yaml) on every weekday -->
+    <!-- Run immediately when the agent is loaded (login / session start) -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Also fire at work_start time (read from conf/config.yaml) on every weekday -->
     <key>StartCalendarInterval</key>
     <array>
         <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>${WORK_HOUR}</integer><key>Minute</key><integer>${WORK_MINUTE}</integer></dict>
@@ -88,7 +98,7 @@ write_plist() {
         <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>${WORK_HOUR}</integer><key>Minute</key><integer>${WORK_MINUTE}</integer></dict>
     </array>
 
-    <!-- Do not restart automatically — the script self-exits after work hours -->
+    <!-- Do not restart automatically — the app self-exits after work hours -->
     <key>KeepAlive</key>
     <false/>
 
