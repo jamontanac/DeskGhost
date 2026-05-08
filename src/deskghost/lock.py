@@ -49,7 +49,7 @@ class InstanceLock:
         self._fh: Optional[IO[bytes]] = None
 
     def __enter__(self) -> _LockResult:
-        _LOCK_DIR.mkdir(parents=True, exist_ok=True)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
         try:
             self._fh = open(self._path, "wb")  # noqa: WPS515
             _acquire_exclusive(self._fh)
