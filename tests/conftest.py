@@ -2,7 +2,7 @@
 
 import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -44,6 +44,8 @@ class FakeWatcher:
         self.nudge_calls = 0
         self.reset_calls = 0
         self.cleanup_calls = 0
+        self.prevent_display_sleep_calls = 0
+        self.allow_display_sleep_calls = 0
         self._idle_time = 0.0
 
     def set_idle_time(self, seconds: float) -> None:
@@ -58,6 +60,12 @@ class FakeWatcher:
     def reset_idle(self) -> None:
         self.reset_calls += 1
 
+    def prevent_display_sleep(self) -> None:
+        self.prevent_display_sleep_calls += 1
+
+    def allow_display_sleep(self) -> None:
+        self.allow_display_sleep_calls += 1
+
     def cleanup(self) -> None:
         self.cleanup_calls += 1
 
@@ -66,6 +74,37 @@ class FakeWatcher:
 def fake_watcher():
     """Return a fresh FakeWatcher instance."""
     return FakeWatcher()
+
+
+# ---------------------------------------------------------------------------
+# InstanceLock auto-patch for main tests
+# ---------------------------------------------------------------------------
+
+class _TruthyLock:
+    """Stand-in for a successfully acquired InstanceLock result."""
+    def __bool__(self) -> bool:
+        return True
+
+
+@pytest.fixture(autouse=False)
+def patch_instance_lock():
+    """Patch InstanceLock so main() tests never touch the real lock file.
+
+    Returns a truthy lock by default.  Tests that need to exercise the
+    'already running' path should override this by passing ``acquired=False``
+    to the yielded helper or by replacing the patch entirely.
+
+    Usage in test_main.py::
+
+        def test_something(patch_instance_lock):
+            # InstanceLock already patched — main() will see a live lock
+            ...
+    """
+    mock_lock = MagicMock()
+    mock_lock.__enter__ = MagicMock(return_value=_TruthyLock())
+    mock_lock.__exit__ = MagicMock(return_value=False)
+    with patch("deskghost.main.InstanceLock", return_value=mock_lock):
+        yield mock_lock
 
 
 # ---------------------------------------------------------------------------
