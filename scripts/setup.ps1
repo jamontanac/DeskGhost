@@ -2,11 +2,14 @@
 <#
 .SYNOPSIS
     DeskGhost Windows installer — manages a Task Scheduler task that starts
-    DeskGhost at 07:00 Mon–Fri.
+    DeskGhost at login AND at the configured work-start time Mon–Fri.
 
 .DESCRIPTION
-    The script self-exits when outside work hours, so the task only needs
-    to kick it off once per day.
+    DeskGhost self-exits when outside work hours, so a login-time launch
+    outside working hours is harmless.  A PID lock inside the app prevents
+    double-launch when both triggers fire for the same session (e.g. the
+    machine wakes from sleep with DeskGhost already running and the scheduler
+    fires the missed trigger via StartWhenAvailable).
 
 .PARAMETER Action
     install    Register the scheduled task
@@ -105,9 +108,14 @@ function Invoke-Install {
         -Argument "/c $cmdLine" `
         -WorkingDirectory $ProjectRoot
 
-    # Trigger: weekdays at work_start time (read from conf/config.yaml)
-    $workStart = Get-WorkStart
-    $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At $workStart
+    # Triggers:
+    #   1. At user logon — ensures DeskGhost starts even if the machine was off
+    #      or asleep when the time-based trigger was supposed to fire.
+    #   2. Weekly at work_start time Mon–Fri — fires on time when machine is on.
+    # StartWhenAvailable means the time-based trigger also fires on wake if missed.
+    $workStart   = Get-WorkStart
+    $triggerTime = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At $workStart
+    $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
 
     # Settings: run only when user is logged on, limited privilege (no elevation)
     $settings = New-ScheduledTaskSettingsSet `
@@ -123,7 +131,7 @@ function Invoke-Install {
     Register-ScheduledTask `
         -TaskName  $TaskName `
         -Action    $action `
-        -Trigger   $trigger `
+        -Trigger   @($triggerLogon, $triggerTime) `
         -Settings  $settings `
         -Principal $principal `
         -Force | Out-Null
@@ -133,7 +141,7 @@ function Invoke-Install {
     Write-Green "  uv        : $uvPath"
     Write-Green "  project   : $ProjectRoot"
     Write-Green "  logs      : $LogDir"
-    Write-Green "DeskGhost will start automatically at $workStart Mon-Fri."
+    Write-Green "DeskGhost will start at login and at $workStart Mon-Fri."
     Write-Yellow "To test right now run:  .\scripts\setup.ps1 run-now"
 }
 
