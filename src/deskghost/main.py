@@ -53,18 +53,19 @@ def main() -> int:
                 log.info("Outside work hours. Bot stopped.")
                 break
 
-            # 2. Lunch break — keep screen alive silently
+            # 2. Lunch break — keep display alive without simulating input
             if is_lunch_time():
                 if not in_lunch:
-                    log.info("Lunch break started. Preventing screen lock...")
+                    log.info("Lunch break started. Preventing display sleep (Teams may go idle)...")
                     in_lunch = True
-                watcher.nudge_mouse()
-                throttled.info("lunch", "  [lunch] Screen kept active.")
+                watcher.prevent_display_sleep()
+                throttled.info("lunch", "  [lunch] Display kept active, input simulation paused.")
                 time.sleep(MOVE_INTERVAL_SECONDS)
 
-            # 3. Returning from lunch — reset idle so we don't nudge immediately
+            # 3. Returning from lunch — release display assertion and reset idle
             elif in_lunch:
-                log.info("Lunch break ended. Resetting idle timer.")
+                log.info("Lunch break ended. Releasing display assertion, resetting idle timer.")
+                watcher.allow_display_sleep()
                 watcher.reset_idle()
                 in_lunch = False
                 time.sleep(1)
