@@ -92,10 +92,26 @@ Press `Ctrl+C` to stop.
 
 ## Installing as a scheduled task
 
-The setup scripts register DeskGhost to start automatically at the
-`work_start` time defined in `conf/config.yaml` (default **07:00**), Mon–Fri.
-The bot self-exits when `work_end` is reached, so the
-scheduler only needs to fire it once per day.
+The setup scripts register DeskGhost to start automatically in **two ways**:
+
+1. **At login / session start** — so DeskGhost is running from the moment you
+   open your laptop, even if you missed the time-based trigger because the
+   machine was off or asleep.
+2. **At the `work_start` time** Mon–Fri — as a belt-and-suspenders trigger for
+   days when the machine is already on at that time.
+
+DeskGhost self-exits when `work_end` is reached (or immediately if started
+outside work hours), so a login-time start on a weekend or evening is harmless.
+
+### Single-instance guarantee
+
+A platform-level **file lock** (`~/.deskghost/deskghost.lock`) ensures only
+one instance of DeskGhost ever runs at a time. If a second launch is attempted
+while the first is still running — for example when the machine wakes from
+sleep mid-day and the scheduler fires a missed trigger — the new process
+detects the lock, logs nothing, and exits immediately. The OS releases the
+lock automatically if the process dies unexpectedly, so no manual cleanup is
+ever needed.
 
 ### macOS — LaunchAgent
 
@@ -182,6 +198,7 @@ Log format: `[HH:MM:SS] [LEVEL] message`
 ```
 src/deskghost/
 ├── main.py          # entry point — detects OS and delegates
+├── lock.py          # cross-platform single-instance file lock
 ├── schedule.py      # all configuration constants + work-hours logic
 ├── logger.py        # shared logger + ThrottledLogger
 ├── macos/
