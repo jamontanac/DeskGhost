@@ -113,14 +113,17 @@ def test_load_real_config_returns_all_keys():
     assert expected_keys <= cfg.keys()
 
 
-def test_load_real_config_default_values():
-    cfg = _load()
+def test_load_code_default_values(tmp_path):
+    """When all config keys are absent, _load() must fall back to built-in defaults."""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("{}\n")  # empty mapping → every .get() uses its default
+    cfg = _load(cfg_file)
     assert cfg["IDLE_TIME_SECONDS"]      == 120
     assert cfg["MOVE_INTERVAL_SECONDS"]  == 5
     assert cfg["MOVE_DISTANCE_PIXELS"]   == 20
     assert cfg["WORK_START_TIME"]        == (7, 0)
     assert cfg["WORK_END_TIME"]          == (18, 0)
-    assert cfg["WORK_DAYS"]             == {0, 1, 2, 3, 4}
+    assert cfg["WORK_DAYS"]              == {0, 1, 2, 3, 4}
     assert cfg["LUNCH_START_TIME"]       == (12, 30)
     assert cfg["LUNCH_DURATION_MINUTES"] == 60
     assert cfg["SEND_KEYSTROKES"]        is True

@@ -2,7 +2,7 @@
 
 import sys
 import time
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -13,7 +13,7 @@ pytestmark = pytest.mark.skipif(
 
 
 # ---------------------------------------------------------------------------
-# Helpers — build fake pyautogui / pynput before importing the module
+# Helpers — build fake pyautogui / Quartz before importing the module
 # ---------------------------------------------------------------------------
 
 SCREEN_W, SCREEN_H = 1920, 1080
@@ -26,24 +26,21 @@ def _make_fake_pyautogui(pos=(500, 400)):
     return fake
 
 
-def _make_fake_pynput():
-    listener_instance = MagicMock()
-    listener_cls = MagicMock(return_value=listener_instance)
-    pynput = MagicMock()
-    pynput.mouse.Listener = listener_cls
-    pynput.keyboard.Listener = listener_cls
-    return pynput, listener_instance
+def _make_fake_quartz(idle_seconds=0.0):
+    fake = MagicMock()
+    fake.kCGEventSourceStateHIDSystemState = 1
+    fake.kCGAnyInputEventType = 0xFFFFFFFF
+    fake.CGEventSourceSecondsSinceLastEventType.return_value = idle_seconds
+    return fake
 
 
-def _import_watcher(fake_pyautogui, fake_pynput):
+def _import_watcher(fake_pyautogui, fake_quartz):
     """Import ActivityWatcher with patched external modules."""
     with patch.dict(
         sys.modules,
         {
             "pyautogui": fake_pyautogui,
-            "pynput": fake_pynput,
-            "pynput.mouse": fake_pynput.mouse,
-            "pynput.keyboard": fake_pynput.keyboard,
+            "Quartz": fake_quartz,
         },
     ):
         # Force re-import so module-level size() call uses our fake
@@ -58,27 +55,26 @@ def _import_watcher(fake_pyautogui, fake_pynput):
 # ---------------------------------------------------------------------------
 
 class TestActivityWatcherInit:
-    def test_init_starts_mouse_listener(self):
+    def test_init_caffeinate_is_none(self):
         fake_pyautogui = _make_fake_pyautogui()
-        fake_pynput, listener_instance = _make_fake_pynput()
-        Watcher = _import_watcher(fake_pyautogui, fake_pynput)
-        Watcher()
-        listener_instance.start.assert_called()
-
-    def test_init_starts_keyboard_listener(self):
-        fake_pyautogui = _make_fake_pyautogui()
-        fake_pynput, listener_instance = _make_fake_pynput()
-        Watcher = _import_watcher(fake_pyautogui, fake_pynput)
-        Watcher()
-        # start() should be called at least twice (mouse + keyboard)
-        assert listener_instance.start.call_count >= 2
-
-    def test_init_idle_time_is_near_zero(self):
-        fake_pyautogui = _make_fake_pyautogui()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_pyautogui, fake_pynput)
+        fake_quartz = _make_fake_quartz()
+        Watcher = _import_watcher(fake_pyautogui, fake_quartz)
         w = Watcher()
-        assert w.get_idle_time() < 1.0
+        assert w._caffeinate_proc is None
+
+    def test_init_reset_time_is_none(self):
+        fake_pyautogui = _make_fake_pyautogui()
+        fake_quartz = _make_fake_quartz()
+        Watcher = _import_watcher(fake_pyautogui, fake_quartz)
+        w = Watcher()
+        assert w._reset_time is None
+
+    def test_init_idle_time_reads_from_quartz(self):
+        fake_pyautogui = _make_fake_pyautogui()
+        fake_quartz = _make_fake_quartz(idle_seconds=5.0)
+        Watcher = _import_watcher(fake_pyautogui, fake_quartz)
+        w = Watcher()
+        assert w.get_idle_time() == pytest.approx(5.0)
 
 
 # ---------------------------------------------------------------------------
@@ -86,42 +82,48 @@ class TestActivityWatcherInit:
 # ---------------------------------------------------------------------------
 
 class TestIdleTracking:
-    def test_get_idle_time_increases_over_time(self):
+    def test_get_idle_time_returns_hid_value_when_no_reset(self):
         fake_pyautogui = _make_fake_pyautogui()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_pyautogui, fake_pynput)
+        fake_quartz = _make_fake_quartz(idle_seconds=42.0)
+        Watcher = _import_watcher(fake_pyautogui, fake_quartz)
         w = Watcher()
-        w.last_activity_time = time.time() - 30
-        assert w.get_idle_time() >= 30
+        assert w.get_idle_time() == pytest.approx(42.0)
 
-    def test_reset_idle_resets_timer(self):
+    def test_get_idle_time_uses_reset_time_when_smaller(self):
         fake_pyautogui = _make_fake_pyautogui()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_pyautogui, fake_pynput)
+        fake_quartz = _make_fake_quartz(idle_seconds=3600.0)
+        Watcher = _import_watcher(fake_pyautogui, fake_quartz)
         w = Watcher()
-        w.last_activity_time = time.time() - 120
+        w.reset_idle()
+        # time_since_reset ~0 < 3600, so get_idle_time() ~0
+        assert w.get_idle_time() < 1.0
+
+    def test_get_idle_time_uses_hid_when_smaller_than_since_reset(self):
+        fake_pyautogui = _make_fake_pyautogui()
+        fake_quartz = _make_fake_quartz(idle_seconds=5.0)
+        Watcher = _import_watcher(fake_pyautogui, fake_quartz)
+        w = Watcher()
+        # Set reset_time far in the past so time_since_reset >> hid_idle
+        w._reset_time = time.time() - 3600
+        assert w.get_idle_time() == pytest.approx(5.0)
+
+    def test_reset_idle_sets_reset_time(self):
+        fake_pyautogui = _make_fake_pyautogui()
+        fake_quartz = _make_fake_quartz()
+        Watcher = _import_watcher(fake_pyautogui, fake_quartz)
+        w = Watcher()
+        before = time.time()
+        w.reset_idle()
+        after = time.time()
+        assert before <= w._reset_time <= after
+
+    def test_reset_idle_makes_idle_time_near_zero(self):
+        fake_pyautogui = _make_fake_pyautogui()
+        fake_quartz = _make_fake_quartz(idle_seconds=120.0)
+        Watcher = _import_watcher(fake_pyautogui, fake_quartz)
+        w = Watcher()
         w.reset_idle()
         assert w.get_idle_time() < 1.0
-
-    def test_on_activity_updates_last_activity_time(self):
-        fake_pyautogui = _make_fake_pyautogui()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_pyautogui, fake_pynput)
-        w = Watcher()
-        w.last_activity_time = time.time() - 60
-        w._on_activity()
-        assert w.get_idle_time() < 1.0
-
-    def test_on_activity_ignored_while_bot_moving(self):
-        fake_pyautogui = _make_fake_pyautogui()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_pyautogui, fake_pynput)
-        w = Watcher()
-        old_time = time.time() - 60
-        w.last_activity_time = old_time
-        w._bot_moving = True
-        w._on_activity()
-        assert w.last_activity_time == old_time
 
 
 # ---------------------------------------------------------------------------
@@ -132,8 +134,8 @@ class TestNudgeMouse:
     def test_nudge_calls_moveto_twice(self):
         origin = (500, 400)
         fake_pyautogui = _make_fake_pyautogui(pos=origin)
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_pyautogui, fake_pynput)
+        fake_quartz = _make_fake_quartz()
+        Watcher = _import_watcher(fake_pyautogui, fake_quartz)
         w = Watcher()
         w.nudge_mouse()
         assert fake_pyautogui.moveTo.call_count == 2
@@ -141,11 +143,10 @@ class TestNudgeMouse:
     def test_nudge_returns_to_origin(self):
         origin = (500, 400)
         fake_pyautogui = _make_fake_pyautogui(pos=origin)
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_pyautogui, fake_pynput)
+        fake_quartz = _make_fake_quartz()
+        Watcher = _import_watcher(fake_pyautogui, fake_quartz)
         w = Watcher()
         w.nudge_mouse()
-        # Second moveTo call should be back to origin
         last_call = fake_pyautogui.moveTo.call_args_list[-1]
         assert last_call[0][0] == origin[0]
         assert last_call[0][1] == origin[1]
@@ -154,8 +155,8 @@ class TestNudgeMouse:
         # Place cursor at top-left corner; nudge offset will be clamped to >= 0
         origin = (0, 0)
         fake_pyautogui = _make_fake_pyautogui(pos=origin)
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_pyautogui, fake_pynput)
+        fake_quartz = _make_fake_quartz()
+        Watcher = _import_watcher(fake_pyautogui, fake_quartz)
         w = Watcher()
         for _ in range(20):
             w.nudge_mouse()
@@ -165,43 +166,27 @@ class TestNudgeMouse:
             assert 0 <= ty < SCREEN_H
             fake_pyautogui.moveTo.reset_mock()
 
-    def test_nudge_bot_moving_flag_reset_after_nudge(self):
-        fake_pyautogui = _make_fake_pyautogui()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_pyautogui, fake_pynput)
-        w = Watcher()
-        w.nudge_mouse()
-        assert w._bot_moving is False
-
-    def test_nudge_bot_moving_flag_reset_even_on_exception(self):
-        origin = (500, 400)
-        fake_pyautogui = _make_fake_pyautogui(pos=origin)
-        fake_pyautogui.moveTo.side_effect = RuntimeError("boom")
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_pyautogui, fake_pynput)
-        w = Watcher()
-        with pytest.raises(RuntimeError):
-            w.nudge_mouse()
-        assert w._bot_moving is False
-
 
 # ---------------------------------------------------------------------------
 # cleanup
 # ---------------------------------------------------------------------------
 
 class TestCleanup:
-    def test_cleanup_stops_mouse_listener(self):
+    def test_cleanup_terminates_caffeinate(self):
         fake_pyautogui = _make_fake_pyautogui()
-        fake_pynput, listener_instance = _make_fake_pynput()
-        Watcher = _import_watcher(fake_pyautogui, fake_pynput)
+        fake_quartz = _make_fake_quartz()
+        Watcher = _import_watcher(fake_pyautogui, fake_quartz)
         w = Watcher()
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        w._caffeinate_proc = mock_proc
         w.cleanup()
-        listener_instance.stop.assert_called()
+        mock_proc.terminate.assert_called_once()
 
-    def test_cleanup_stops_keyboard_listener(self):
+    def test_cleanup_without_caffeinate_is_safe(self):
         fake_pyautogui = _make_fake_pyautogui()
-        fake_pynput, listener_instance = _make_fake_pynput()
-        Watcher = _import_watcher(fake_pyautogui, fake_pynput)
+        fake_quartz = _make_fake_quartz()
+        Watcher = _import_watcher(fake_pyautogui, fake_quartz)
         w = Watcher()
+        # Should not raise when no caffeinate process was started
         w.cleanup()
-        assert listener_instance.stop.call_count >= 2
