@@ -113,7 +113,7 @@ PLIST
 }
 
 agent_is_loaded() {
-    launchctl list 2>/dev/null | grep -q "$LABEL"
+    launchctl list "$LABEL" &>/dev/null
 }
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -131,11 +131,11 @@ cmd_install() {
     # Unload stale agent if present
     if agent_is_loaded; then
         yellow "Existing agent found — reloading..."
-        launchctl unload "$PLIST_DST" 2>/dev/null || true
+        launchctl bootout "gui/$(id -u)" "$PLIST_DST" 2>/dev/null || true
     fi
 
     write_plist
-    launchctl load "$PLIST_DST"
+    launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"
 
     green "LaunchAgent installed."
     green "  plist     : ${PLIST_DST}"
@@ -148,7 +148,7 @@ cmd_install() {
 
 cmd_uninstall() {
     if agent_is_loaded; then
-        launchctl unload "$PLIST_DST"
+        launchctl bootout "gui/$(id -u)" "$PLIST_DST"
         green "LaunchAgent unloaded."
     else
         yellow "Agent was not loaded."
@@ -172,7 +172,7 @@ cmd_run_now() {
 cmd_status() {
     if agent_is_loaded; then
         green "Agent IS loaded:"
-        launchctl list | grep "$LABEL"
+        launchctl list "$LABEL"
     else
         red "Agent is NOT loaded."
         yellow "Run:  bash scripts/setup.sh install"
