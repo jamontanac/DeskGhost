@@ -25,8 +25,15 @@ def main() -> int:
         if not lock:
             # Another instance is already running (e.g. machine woke from sleep
             # while a previous session was still alive, and the scheduler or
-            # login item fired again).  Exit silently — no logging needed since
-            # the running instance is already doing its job.
+            # login item fired again).  Log the PID so the user can kill it manually.
+            log = get_logger()
+            if lock.pid is not None:
+                log.warning(
+                    f"DeskGhost already running (PID {lock.pid}). "
+                    f"To stop it: kill {lock.pid}"
+                )
+            else:
+                log.warning("DeskGhost already running (PID unknown). Lock file: ~/.deskghost/deskghost.lock")
             return 0
         return _run()
 
