@@ -113,7 +113,7 @@ PLIST
 }
 
 agent_is_loaded() {
-    launchctl list 2>/dev/null | grep -q "$LABEL"
+    launchctl list "$LABEL" &>/dev/null
 }
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -131,11 +131,16 @@ cmd_install() {
     # Unload stale agent if present
     if agent_is_loaded; then
         yellow "Existing agent found — reloading..."
-        launchctl unload "$PLIST_DST" 2>/dev/null || true
+        launchctl bootout "gui/$(id -u)" "$PLIST_DST" 2>/dev/null || true
     fi
 
     write_plist
-    launchctl load "$PLIST_DST"
+    launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"
+
+    # Resolve the Python interpreter the venv will actually use so we can
+    # show the user exactly which binary to add to Accessibility.
+    local PY_BIN
+    PY_BIN="$("$UV_PATH" run --no-env-file python -c 'import sys; print(sys.executable)' 2>/dev/null || echo "(unknown — run: uv run python -c 'import sys; print(sys.executable)')")"
 
     green "LaunchAgent installed."
     green "  plist     : ${PLIST_DST}"
@@ -143,12 +148,26 @@ cmd_install() {
     green "  project   : ${PROJECT_ROOT}"
     green "  logs      : ${LOG_DIR}"
     green "DeskGhost will start automatically at $(read_work_start | awk '{printf "%02d:%02d", $1, $2}') Mon–Fri."
+    echo ""
+    yellow "────────────────────────────────────────────────────────"
+    yellow "  ACTION REQUIRED — Accessibility permission"
+    yellow "  Mouse simulation only works when the Python process has"
+    yellow "  macOS Accessibility permission (needed to inject mouse"
+    yellow "  events into the HID stream so Teams stays active)."
+    yellow ""
+    yellow "  1. Open:  System Settings → Privacy & Security → Accessibility"
+    yellow "  2. Click the lock to make changes, then click  +"
+    yellow "  3. Add this binary:"
+    yellow "       ${PY_BIN}"
+    yellow "  4. Re-run:  bash scripts/setup.sh uninstall && bash scripts/setup.sh install"
+    yellow "────────────────────────────────────────────────────────"
+    echo ""
     yellow "To test right now run:  bash scripts/setup.sh run-now"
 }
 
 cmd_uninstall() {
     if agent_is_loaded; then
-        launchctl unload "$PLIST_DST"
+        launchctl bootout "gui/$(id -u)" "$PLIST_DST"
         green "LaunchAgent unloaded."
     else
         yellow "Agent was not loaded."
@@ -172,7 +191,7 @@ cmd_run_now() {
 cmd_status() {
     if agent_is_loaded; then
         green "Agent IS loaded:"
-        launchctl list | grep "$LABEL"
+        launchctl list "$LABEL"
     else
         red "Agent is NOT loaded."
         yellow "Run:  bash scripts/setup.sh install"

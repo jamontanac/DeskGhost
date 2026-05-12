@@ -22,6 +22,7 @@ The lock is an OS advisory file lock, NOT a PID file.  This means:
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from types import TracebackType
@@ -34,8 +35,9 @@ _LOCK_FILE = _LOCK_DIR / "deskghost.lock"
 class _LockResult:
     """Returned by ``InstanceLock.__enter__``.  Evaluates to bool."""
 
-    def __init__(self, acquired: bool) -> None:
+    def __init__(self, acquired: bool, pid: Optional[int] = None) -> None:
         self._acquired = acquired
+        self.pid = pid  # PID of the already-running instance when acquired=False
 
     def __bool__(self) -> bool:
         return self._acquired
@@ -53,13 +55,23 @@ class InstanceLock:
         try:
             self._fh = open(self._path, "wb")  # noqa: WPS515
             _acquire_exclusive(self._fh)
+            # Store our PID so other instances can read it
+            self._fh.write(str(os.getpid()).encode())
+            self._fh.flush()
             return _LockResult(True)
         except OSError:
-            # Lock is held by another process
+            # Lock is held by another process — try to read its PID
             if self._fh is not None:
                 self._fh.close()
                 self._fh = None
-            return _LockResult(False)
+            existing_pid: Optional[int] = None
+            try:
+                raw = self._path.read_text().strip()
+                if raw.isdigit():
+                    existing_pid = int(raw)
+            except OSError:
+                pass
+            return _LockResult(False, pid=existing_pid)
 
     def __exit__(
         self,

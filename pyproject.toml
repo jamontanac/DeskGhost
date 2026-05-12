@@ -1,6 +1,6 @@
 [project]
 name = "deskghost"
-version = "0.1.0"
+version = "0.1.1"
 description = "Your desk, haunted. DeskGhost silently keeps your presence alive on Teams so you never go grey."
 readme = "README.md"
 authors = [
@@ -9,8 +9,8 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "pyautogui>=0.9.54",
-    "pynput>=1.8.1",
     "pyyaml>=6.0",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
 ]
 
 [project.scripts]

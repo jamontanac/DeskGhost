@@ -135,10 +135,6 @@ bash scripts/setup.sh logs
 bash scripts/setup.sh uninstall
 ```
 
-**First run on macOS:** the OS will prompt for Accessibility permissions
-(`System Settings > Privacy & Security > Accessibility`). This is required
-for `pynput` to monitor input. Grant it, then re-run.
-
 The plist is installed to `~/Library/LaunchAgents/com.deskghost.agent.plist`.
 Logs go to `~/.deskghost/logs/`.
 
@@ -202,7 +198,7 @@ src/deskghost/
 ├── schedule.py      # all configuration constants + work-hours logic
 ├── logger.py        # shared logger + ThrottledLogger
 ├── macos/
-│   └── watcher.py   # macOS: pynput + pyautogui
+│   └── watcher.py   # macOS: Quartz (CGEventSource) + pyautogui
 └── windows/
     └── watcher.py   # Windows: ctypes (user32/kernel32), no pyautogui
 
@@ -271,7 +267,5 @@ which command to re-run to fix it.
 - **Corporate EDR (CrowdStrike, SentinelOne, etc.)** uses behaviour-based
   detection. If keystroke simulation is flagged, set `SEND_KEYSTROKES = False`
   in `schedule.py` to fall back to mouse-only mode.
-- **macOS TCC:** the Accessibility permission prompt on first run is expected
-  and correct — it is the OS doing its job.
 - Use this tool at your own discretion and in accordance with your
   organisation's policies.
