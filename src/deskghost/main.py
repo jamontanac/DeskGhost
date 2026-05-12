@@ -1,3 +1,4 @@
+import ctypes
 import sys
 import time
 
@@ -18,6 +19,20 @@ if sys.platform == "win32":
     from deskghost.windows.watcher import ActivityWatcher
 else:
     from deskghost.macos.watcher import ActivityWatcher
+
+
+def _is_accessibility_trusted() -> bool:
+    """Return True if this process has macOS Accessibility (AX) permission."""
+    if sys.platform == "win32":
+        return True
+    try:
+        lib = ctypes.CDLL(
+            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+        )
+        lib.AXIsProcessTrusted.restype = ctypes.c_bool
+        return lib.AXIsProcessTrusted()
+    except OSError:
+        return True
 
 
 def main() -> int:
@@ -62,6 +77,16 @@ def _run() -> int:
     log.info(f"  Platform : {sys.platform}")
     log.info(f"  Log file : {log_file}")
     log.info("=" * 55)
+
+    if not _is_accessibility_trusted():
+        log.warning("=" * 55)
+        log.warning("  ACCESSIBILITY PERMISSION NOT GRANTED")
+        log.warning("  CGEventPost cannot inject into the HID stream — mouse")
+        log.warning("  simulation will run but Teams will still go idle.")
+        log.warning("  Fix: System Settings → Privacy & Security → Accessibility")
+        log.warning(f"  Add: {sys.executable}")
+        log.warning("  Then: bash scripts/setup.sh uninstall && bash scripts/setup.sh install")
+        log.warning("=" * 55)
 
     in_lunch = False
 
