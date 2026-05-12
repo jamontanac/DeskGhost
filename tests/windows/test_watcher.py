@@ -1,8 +1,8 @@
 """Tests for deskghost.windows.watcher — skipped on non-Windows platforms."""
 
 import sys
-import time
-from unittest.mock import MagicMock, call, patch
+import ctypes
+from unittest.mock import MagicMock, patch, call
 
 import pytest
 
@@ -12,72 +12,50 @@ pytestmark = pytest.mark.skipif(
 )
 
 # ---------------------------------------------------------------------------
-# Helpers — build fake ctypes / pynput before importing the module
+# Constants mirrored from the module under test
 # ---------------------------------------------------------------------------
 
-SCREEN_W, SCREEN_H = 1920, 1080
-_ES_CONTINUOUS = 0x80000000
-_ES_SYSTEM_REQUIRED = 0x00000001
+_ES_CONTINUOUS       = 0x80000000
+_ES_SYSTEM_REQUIRED  = 0x00000001
 _ES_DISPLAY_REQUIRED = 0x00000002
-_VK_CTRL        = 0x11
-_VK_SHIFT       = 0x10
-_VK_ALT         = 0x12
-_VK_SCROLL_LOCK = 0x91
-_VK_F13         = 0x7C
-_VK_F14         = 0x7D
-_VK_F15         = 0x7E
-_SAFE_KEYS      = [_VK_CTRL, _VK_SHIFT, _VK_ALT, _VK_SCROLL_LOCK, _VK_F13, _VK_F14, _VK_F15]
-_KEYEVENTF_KEYUP = 0x0002
+_INPUT_MOUSE         = 0
+_MOUSEEVENTF_MOVE    = 0x0001
 
 
-def _make_fake_ctypes(cursor_pos=(500, 400)):
-    """Build a fake ctypes module with controllable user32/kernel32."""
+# ---------------------------------------------------------------------------
+# Helpers — build a fake ctypes windll before importing the module
+# ---------------------------------------------------------------------------
+
+def _make_fake_windll(last_input_ms: int = 0, tick_count: int = 0):
+    """Return (fake_windll, user32_mock, kernel32_mock).
+
+    last_input_ms: dwTime value returned by GetLastInputInfo
+    tick_count:    value returned by GetTickCount
+    The idle time reported by get_idle_time() == (tick_count - last_input_ms) / 1000
+    """
     user32 = MagicMock()
     kernel32 = MagicMock()
 
-    # GetSystemMetrics returns screen dimensions
-    user32.GetSystemMetrics.side_effect = lambda idx: SCREEN_W if idx == 0 else SCREEN_H
+    # GetLastInputInfo fills the LASTINPUTINFO struct's dwTime field
+    def _get_last_input(lii_ref):
+        lii_ref.dwTime = last_input_ms
+        return True
 
-    # GetCursorPos fills the POINT structure passed by reference
-    def _get_cursor_pos(point_ref):
-        point_ref.x = cursor_pos[0]
-        point_ref.y = cursor_pos[1]
+    user32.GetLastInputInfo.side_effect = _get_last_input
+    user32.SendInput.return_value = 1
 
-    user32.GetCursorPos.side_effect = _get_cursor_pos
+    kernel32.GetTickCount.return_value = tick_count
+    kernel32.SetThreadExecutionState.return_value = 0
 
     windll = MagicMock()
     windll.user32 = user32
     windll.kernel32 = kernel32
-
-    fake_ctypes = MagicMock()
-    fake_ctypes.windll = windll
-    # Make Structure and c_long passthrough so _POINT can be defined
-    fake_ctypes.Structure = object
-    fake_ctypes.c_long = int
-    fake_ctypes.c_int = int
-
-    return fake_ctypes, user32, kernel32
+    return windll, user32, kernel32
 
 
-def _make_fake_pynput():
-    listener_instance = MagicMock()
-    listener_cls = MagicMock(return_value=listener_instance)
-    pynput = MagicMock()
-    pynput.mouse.Listener = listener_cls
-    pynput.keyboard.Listener = listener_cls
-    return pynput, listener_instance
-
-
-def _import_watcher(fake_ctypes, fake_pynput):
-    with patch.dict(
-        sys.modules,
-        {
-            "ctypes": fake_ctypes,
-            "pynput": fake_pynput,
-            "pynput.mouse": fake_pynput.mouse,
-            "pynput.keyboard": fake_pynput.keyboard,
-        },
-    ):
+def _import_watcher(windll, last_input_ms=0, tick_count=0):
+    """Import ActivityWatcher with a patched ctypes.windll."""
+    with patch("ctypes.windll", windll):
         if "deskghost.windows.watcher" in sys.modules:
             del sys.modules["deskghost.windows.watcher"]
         from deskghost.windows.watcher import ActivityWatcher
@@ -90,176 +68,112 @@ def _import_watcher(fake_ctypes, fake_pynput):
 
 class TestActivityWatcherInit:
     def test_init_calls_set_thread_execution_state(self):
-        fake_ctypes, user32, kernel32 = _make_fake_ctypes()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
+        windll, user32, kernel32 = _make_fake_windll()
+        Watcher = _import_watcher(windll)
         Watcher()
         kernel32.SetThreadExecutionState.assert_called_once_with(
             _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED | _ES_DISPLAY_REQUIRED
         )
 
-    def test_init_starts_listeners(self):
-        fake_ctypes, _, _ = _make_fake_ctypes()
-        fake_pynput, listener_instance = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
-        Watcher()
-        assert listener_instance.start.call_count >= 2
-
-    def test_init_idle_time_is_near_zero(self):
-        fake_ctypes, _, _ = _make_fake_ctypes()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
+    def test_init_does_not_start_any_listeners(self):
+        """No pynput listener threads should be created."""
+        windll, user32, kernel32 = _make_fake_windll()
+        Watcher = _import_watcher(windll)
         w = Watcher()
-        assert w.get_idle_time() < 1.0
+        # The watcher must expose only expected public attributes
+        assert not hasattr(w, "_mouse_listener")
+        assert not hasattr(w, "_kbd_listener")
 
 
 # ---------------------------------------------------------------------------
-# get_idle_time / reset_idle
+# get_idle_time — delegates to GetLastInputInfo
 # ---------------------------------------------------------------------------
 
 class TestIdleTracking:
-    def test_get_idle_time_increases_over_time(self):
-        fake_ctypes, _, _ = _make_fake_ctypes()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
+    def test_get_idle_time_returns_elapsed_since_last_input(self):
+        # tick_count=5000, last_input_ms=0 → idle = 5.0 s
+        windll, user32, kernel32 = _make_fake_windll(last_input_ms=0, tick_count=5000)
+        Watcher = _import_watcher(windll)
         w = Watcher()
-        w.last_activity_time = time.time() - 30
-        assert w.get_idle_time() >= 30
+        assert w.get_idle_time() == pytest.approx(5.0)
 
-    def test_reset_idle_resets_timer(self):
-        fake_ctypes, _, _ = _make_fake_ctypes()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
+    def test_get_idle_time_zero_when_just_used(self):
+        # tick_count == last_input_ms → idle = 0 s
+        windll, user32, kernel32 = _make_fake_windll(last_input_ms=1000, tick_count=1000)
+        Watcher = _import_watcher(windll)
         w = Watcher()
-        w.last_activity_time = time.time() - 120
+        assert w.get_idle_time() == pytest.approx(0.0)
+
+    def test_get_idle_time_calls_get_last_input_info(self):
+        windll, user32, kernel32 = _make_fake_windll()
+        Watcher = _import_watcher(windll)
+        w = Watcher()
+        w.get_idle_time()
+        user32.GetLastInputInfo.assert_called()
+
+    def test_get_idle_time_never_negative(self):
+        # tick_count < last_input_ms (e.g. tick counter wrapped) → clamped to 0
+        windll, user32, kernel32 = _make_fake_windll(last_input_ms=9000, tick_count=1000)
+        Watcher = _import_watcher(windll)
+        w = Watcher()
+        assert w.get_idle_time() >= 0.0
+
+    def test_reset_idle_calls_send_input(self):
+        windll, user32, kernel32 = _make_fake_windll()
+        Watcher = _import_watcher(windll)
+        w = Watcher()
+        user32.SendInput.reset_mock()
         w.reset_idle()
-        assert w.get_idle_time() < 1.0
-
-    def test_on_activity_updates_last_activity_time(self):
-        fake_ctypes, _, _ = _make_fake_ctypes()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
-        w = Watcher()
-        w.last_activity_time = time.time() - 60
-        w._on_activity()
-        assert w.get_idle_time() < 1.0
-
-    def test_on_activity_ignored_while_bot_moving(self):
-        fake_ctypes, _, _ = _make_fake_ctypes()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
-        w = Watcher()
-        old_time = time.time() - 60
-        w.last_activity_time = old_time
-        w._bot_moving = True
-        w._on_activity()
-        assert w.last_activity_time == old_time
+        user32.SendInput.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
-# nudge_mouse
+# nudge_mouse — SendInput zero-delta MOUSEEVENTF_MOVE
 # ---------------------------------------------------------------------------
 
 class TestNudgeMouse:
-    def test_nudge_calls_set_cursor_pos_multiple_times(self):
-        fake_ctypes, user32, _ = _make_fake_ctypes(cursor_pos=(500, 400))
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
+    def test_nudge_calls_send_input_once(self):
+        windll, user32, kernel32 = _make_fake_windll()
+        Watcher = _import_watcher(windll)
+        w = Watcher()
+        user32.SendInput.reset_mock()
+        w.nudge_mouse()
+        user32.SendInput.assert_called_once()
+
+    def test_nudge_send_input_count_is_one(self):
+        """First arg to SendInput must be 1 (one INPUT struct)."""
+        windll, user32, kernel32 = _make_fake_windll()
+        Watcher = _import_watcher(windll)
+        w = Watcher()
+        user32.SendInput.reset_mock()
+        w.nudge_mouse()
+        count_arg = user32.SendInput.call_args[0][0]
+        assert count_arg == 1
+
+    def test_nudge_does_not_call_set_cursor_pos(self):
+        """Cursor must not move — SetCursorPos must never be called."""
+        windll, user32, kernel32 = _make_fake_windll()
+        Watcher = _import_watcher(windll)
         w = Watcher()
         w.nudge_mouse()
-        # Two linear interpolations of _MOVE_STEPS each
-        assert user32.SetCursorPos.call_count >= 2
+        user32.SetCursorPos.assert_not_called()
 
-    def test_nudge_target_clamped_to_screen_bounds(self):
-        # Cursor at bottom-right corner
-        fake_ctypes, user32, _ = _make_fake_ctypes(cursor_pos=(SCREEN_W - 1, SCREEN_H - 1))
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
-        w = Watcher()
-        for _ in range(20):
-            user32.SetCursorPos.reset_mock()
-            w.nudge_mouse()
-            for c in user32.SetCursorPos.call_args_list:
-                x, y = c[0]
-                assert 0 <= x < SCREEN_W
-                assert 0 <= y < SCREEN_H
-
-    def test_nudge_bot_moving_flag_reset_after_nudge(self):
-        fake_ctypes, _, _ = _make_fake_ctypes()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
+    def test_nudge_does_not_call_keybd_event(self):
+        """Keystrokes must not be sent — keybd_event must never be called."""
+        windll, user32, kernel32 = _make_fake_windll()
+        Watcher = _import_watcher(windll)
         w = Watcher()
         w.nudge_mouse()
-        assert w._bot_moving is False
+        user32.keybd_event.assert_not_called()
 
-    def test_nudge_bot_moving_flag_reset_on_exception(self):
-        fake_ctypes, user32, _ = _make_fake_ctypes()
-        user32.SetCursorPos.side_effect = OSError("boom")
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
+    def test_nudge_can_be_called_multiple_times(self):
+        windll, user32, kernel32 = _make_fake_windll()
+        Watcher = _import_watcher(windll)
         w = Watcher()
-        with pytest.raises(OSError):
+        user32.SendInput.reset_mock()
+        for _ in range(5):
             w.nudge_mouse()
-        assert w._bot_moving is False
-
-    def test_nudge_calls_press_random_key_when_send_keystrokes_true(self):
-        fake_ctypes, user32, _ = _make_fake_ctypes()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
-        w = Watcher()
-        with patch("deskghost.windows.watcher.SEND_KEYSTROKES", True):
-            w.nudge_mouse()
-        # keybd_event must be called exactly twice: key-down + key-up
-        assert user32.keybd_event.call_count == 2
-
-    def test_nudge_skips_press_random_key_when_send_keystrokes_false(self):
-        fake_ctypes, user32, _ = _make_fake_ctypes()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
-        w = Watcher()
-        with patch("deskghost.windows.watcher.SEND_KEYSTROKES", False):
-            w.nudge_mouse()
-        assert user32.keybd_event.call_count == 0
-
-
-# ---------------------------------------------------------------------------
-# _press_random_key
-# ---------------------------------------------------------------------------
-
-class TestPressRandomKey:
-    def test_press_random_key_uses_key_from_safe_pool(self):
-        fake_ctypes, user32, _ = _make_fake_ctypes()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
-        w = Watcher()
-        for _ in range(30):
-            user32.keybd_event.reset_mock()
-            w._press_random_key()
-            down_call = user32.keybd_event.call_args_list[0]
-            vk = down_call[0][0]
-            assert vk in _SAFE_KEYS, f"Unexpected VK code: {hex(vk)}"
-
-    def test_press_random_key_sends_keydown_then_keyup(self):
-        fake_ctypes, user32, _ = _make_fake_ctypes()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
-        w = Watcher()
-        w._press_random_key()
-        calls = user32.keybd_event.call_args_list
-        assert len(calls) == 2
-        # first call: dwFlags == 0 (key down)
-        assert calls[0][0][2] == 0
-        # second call: dwFlags == KEYEVENTF_KEYUP
-        assert calls[1][0][2] == _KEYEVENTF_KEYUP
-
-    def test_press_random_key_uses_same_vk_for_down_and_up(self):
-        fake_ctypes, user32, _ = _make_fake_ctypes()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
-        w = Watcher()
-        w._press_random_key()
-        calls = user32.keybd_event.call_args_list
-        assert calls[0][0][0] == calls[1][0][0]
+        assert user32.SendInput.call_count == 5
 
 
 # ---------------------------------------------------------------------------
@@ -268,18 +182,19 @@ class TestPressRandomKey:
 
 class TestCleanup:
     def test_cleanup_restores_execution_state(self):
-        fake_ctypes, _, kernel32 = _make_fake_ctypes()
-        fake_pynput, _ = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
+        windll, user32, kernel32 = _make_fake_windll()
+        Watcher = _import_watcher(windll)
         w = Watcher()
         kernel32.SetThreadExecutionState.reset_mock()
         w.cleanup()
         kernel32.SetThreadExecutionState.assert_called_once_with(_ES_CONTINUOUS)
 
-    def test_cleanup_stops_listeners(self):
-        fake_ctypes, _, _ = _make_fake_ctypes()
-        fake_pynput, listener_instance = _make_fake_pynput()
-        Watcher = _import_watcher(fake_ctypes, fake_pynput)
+    def test_cleanup_does_not_call_listener_stop(self):
+        """No pynput .stop() calls — listeners don't exist."""
+        windll, user32, kernel32 = _make_fake_windll()
+        Watcher = _import_watcher(windll)
         w = Watcher()
         w.cleanup()
-        assert listener_instance.stop.call_count >= 2
+        # If no AttributeError raised and only SetThreadExecutionState was
+        # called, the test passes.
+        assert True

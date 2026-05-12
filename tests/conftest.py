@@ -1,7 +1,6 @@
 """Shared fixtures for the deskghost test suite."""
 
 import time
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -105,19 +104,3 @@ def patch_instance_lock():
     mock_lock.__exit__ = MagicMock(return_value=False)
     with patch("deskghost.main.InstanceLock", return_value=mock_lock):
         yield mock_lock
-
-
-# ---------------------------------------------------------------------------
-# Fake pynput listeners (used by platform watcher tests)
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def fake_pynput():
-    """Return a MagicMock that stands in for the pynput module."""
-    listener_instance = MagicMock()
-    listener_cls = MagicMock(return_value=listener_instance)
-
-    pynput = MagicMock()
-    pynput.mouse.Listener = listener_cls
-    pynput.keyboard.Listener = listener_cls
-    return pynput
