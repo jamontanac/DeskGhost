@@ -89,6 +89,7 @@ def _run() -> int:
         log.warning("=" * 55)
 
     in_lunch = False
+    last_nudge_time: float = 0.0  # epoch 0 ensures first nudge fires immediately
 
     try:
         while True:
@@ -114,14 +115,17 @@ def _run() -> int:
                 in_lunch = False
                 time.sleep(1)
 
-            # 4. User has been idle long enough — nudge
+            # 4. User has been idle long enough — nudge on wall-clock interval
             elif watcher.get_idle_time() >= IDLE_TIME_SECONDS:
-                watcher.nudge_mouse()
-                throttled.info(
-                    "nudge",
-                    f"  [idle {int(watcher.get_idle_time())}s] Cursor moved and restored.",
-                )
-                time.sleep(MOVE_INTERVAL_SECONDS)
+                now = time.time()
+                if now - last_nudge_time >= MOVE_INTERVAL_SECONDS:
+                    watcher.nudge_mouse()
+                    last_nudge_time = now
+                    throttled.info(
+                        "nudge",
+                        f"  [idle {int(watcher.get_idle_time())}s] Cursor moved and restored.",
+                    )
+                time.sleep(1)
 
             # 5. User is active — nothing to do
             else:
