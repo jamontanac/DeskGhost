@@ -63,14 +63,6 @@ def _require_int(value: object, field: str, min_val: int = 1) -> int:
     return value
 
 
-def _require_bool(value: object, field: str) -> bool:
-    if not isinstance(value, bool):
-        raise ValueError(
-            f"Config field '{field}' must be a boolean (true/false), got: {value!r}"
-        )
-    return value
-
-
 # ── Loader ────────────────────────────────────────────────────────────────────
 
 def _load(path: Path | None = None) -> dict:
@@ -93,18 +85,15 @@ def _load(path: Path | None = None) -> dict:
     nudge    = raw.get("nudge", {})
     schedule = raw.get("schedule", {})
     lunch    = raw.get("lunch", {})
-    windows  = raw.get("windows", {})
 
     return {
         "IDLE_TIME_SECONDS":      _require_int(nudge.get("idle_time_seconds", 120),    "nudge.idle_time_seconds"),
         "MOVE_INTERVAL_SECONDS":  _require_int(nudge.get("move_interval_seconds", 5),  "nudge.move_interval_seconds"),
-        "MOVE_DISTANCE_PIXELS":   _require_int(nudge.get("move_distance_pixels", 20),  "nudge.move_distance_pixels"),
         "WORK_START_TIME":        _parse_hhmm(schedule.get("work_start", "07:00"),     "schedule.work_start"),
         "WORK_END_TIME":          _parse_hhmm(schedule.get("work_end",   "18:00"),     "schedule.work_end"),
         "WORK_DAYS":              set(schedule.get("work_days", [0, 1, 2, 3, 4])),
         "LUNCH_START_TIME":       _parse_hhmm(lunch.get("start", "12:30"),             "lunch.start"),
         "LUNCH_DURATION_MINUTES": _require_int(lunch.get("duration_minutes", 60),      "lunch.duration_minutes"),
-        "SEND_KEYSTROKES":        _require_bool(windows.get("send_keystrokes", True),  "windows.send_keystrokes"),
     }
 
 
@@ -112,12 +101,10 @@ def _load(path: Path | None = None) -> dict:
 
 _cfg = _load()
 
-IDLE_TIME_SECONDS:      int          = _cfg["IDLE_TIME_SECONDS"]
-MOVE_INTERVAL_SECONDS:  int          = _cfg["MOVE_INTERVAL_SECONDS"]
-MOVE_DISTANCE_PIXELS:   int          = _cfg["MOVE_DISTANCE_PIXELS"]
+IDLE_TIME_SECONDS:      int             = _cfg["IDLE_TIME_SECONDS"]
+MOVE_INTERVAL_SECONDS:  int             = _cfg["MOVE_INTERVAL_SECONDS"]
 WORK_START_TIME:        tuple[int, int] = _cfg["WORK_START_TIME"]
 WORK_END_TIME:          tuple[int, int] = _cfg["WORK_END_TIME"]
-WORK_DAYS:              set[int]     = _cfg["WORK_DAYS"]
+WORK_DAYS:              set[int]        = _cfg["WORK_DAYS"]
 LUNCH_START_TIME:       tuple[int, int] = _cfg["LUNCH_START_TIME"]
-LUNCH_DURATION_MINUTES: int          = _cfg["LUNCH_DURATION_MINUTES"]
-SEND_KEYSTROKES:        bool         = _cfg["SEND_KEYSTROKES"]
+LUNCH_DURATION_MINUTES: int             = _cfg["LUNCH_DURATION_MINUTES"]

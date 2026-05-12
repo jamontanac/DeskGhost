@@ -1,133 +1,132 @@
 import ctypes
-import random
+import ctypes.wintypes
 import time
 
-from pynput import keyboard, mouse
-
-from deskghost.schedule import MOVE_DISTANCE_PIXELS, SEND_KEYSTROKES
-
-# SetThreadExecutionState flags
-_ES_CONTINUOUS = 0x80000000
-_ES_SYSTEM_REQUIRED = 0x00000001
+# ── SetThreadExecutionState flags ─────────────────────────────────────────────
+_ES_CONTINUOUS       = 0x80000000
+_ES_SYSTEM_REQUIRED  = 0x00000001
 _ES_DISPLAY_REQUIRED = 0x00000002
 
-# Virtual-key codes
-# All are modifier / function keys that produce no visible character or UI
-# effect, but register as user input — resetting Teams' idle timer.
-#   Ctrl, Shift, Alt      — standard modifiers
-#   Scroll Lock           — virtually unused, harmless toggle
-#   F13, F14, F15         — exist in the VK table, nothing is bound to them
-#                           by default on standard Windows keyboards
-_VK_CTRL        = 0x11
-_VK_SHIFT       = 0x10
-_VK_ALT         = 0x12
-_VK_SCROLL_LOCK = 0x91
-_VK_F13         = 0x7C
-_VK_F14         = 0x7D
-_VK_F15         = 0x7E
-
-_SAFE_KEYS = [_VK_CTRL, _VK_SHIFT, _VK_ALT, _VK_SCROLL_LOCK, _VK_F13, _VK_F14, _VK_F15]
-
-_KEYEVENTF_KEYUP = 0x0002
-
-# Interpolation steps for smooth cursor movement
-_MOVE_STEPS = 20
-_STEP_SLEEP = 0.01  # seconds per step → ~0.2 s total travel
+# ── SendInput / MOUSEINPUT ────────────────────────────────────────────────────
+_INPUT_MOUSE        = 0
+_MOUSEEVENTF_MOVE   = 0x0001  # relative mouse move — dx/dy of 0 = no movement
 
 
-class _POINT(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx",          ctypes.c_long),
+        ("dy",          ctypes.c_long),
+        ("mouseData",   ctypes.c_ulong),
+        ("dwFlags",     ctypes.c_ulong),
+        ("time",        ctypes.c_ulong),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    ]
 
 
-def _get_screen_size() -> tuple[int, int]:
-    user32 = ctypes.windll.user32
-    user32.GetSystemMetrics.restype = ctypes.c_int
-    return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+class _INPUT(ctypes.Structure):
+    class _INPUT_UNION(ctypes.Union):
+        _fields_ = [("mi", _MOUSEINPUT)]
+
+    _anonymous_ = ("_input",)
+    _fields_ = [
+        ("type",   ctypes.c_ulong),
+        ("_input", _INPUT_UNION),
+    ]
+
+
+class _LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_uint),
+        ("dwTime", ctypes.c_ulong),
+    ]
 
 
 class ActivityWatcher:
-    """Watches for user input and nudges the mouse when the user is idle.
+    """Watches for user input and nudges the system when the user is idle.
 
-    Uses ``ctypes`` (user32/kernel32) for all cursor and keystroke
-    operations — no pyautogui required on Windows.  Also calls
-    ``SetThreadExecutionState`` to prevent the display from sleeping.
+    Uses ``GetLastInputInfo`` to read the OS-level HID idle time (mirrors the
+    macOS ``CGEventSourceSecondsSinceLastEventType`` approach — no listener
+    threads required).
+
+    Nudging is done via ``SendInput`` with a zero-delta ``MOUSEEVENTF_MOVE``
+    event, which resets the system idle timer without moving the cursor
+    visibly.  Optionally a harmless keystroke is also injected when
+    ``SEND_KEYSTROKES`` is enabled.
+
+    ``SetThreadExecutionState`` is held for the lifetime of the watcher to
+    prevent display sleep.
     """
 
     def __init__(self) -> None:
-        self.last_activity_time = time.time()
-        self._bot_moving = False
-        self._user32 = ctypes.windll.user32
-        self._screen_w, self._screen_h = _get_screen_size()
+        self._user32   = ctypes.windll.user32
+        self._kernel32 = ctypes.windll.kernel32
 
         # Prevent system and display sleep for the lifetime of this watcher
-        ctypes.windll.kernel32.SetThreadExecutionState(
+        self._kernel32.SetThreadExecutionState(
             _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED | _ES_DISPLAY_REQUIRED
         )
 
-        self._mouse_listener = mouse.Listener(
-            on_move=self._on_activity,
-            on_click=self._on_activity,
-            on_scroll=self._on_activity,
-        )
-        self._kbd_listener = keyboard.Listener(on_press=self._on_activity)
-        self._mouse_listener.start()
-        self._kbd_listener.start()
-
-    def _on_activity(self, *args) -> None:
-        if not self._bot_moving:
-            self.last_activity_time = time.time()
+    # ── Idle detection ────────────────────────────────────────────────────────
 
     def get_idle_time(self) -> float:
-        """Seconds since the last detected user input event."""
-        return time.time() - self.last_activity_time
+        """Seconds since the last hardware input event.
+
+        Reads ``GetLastInputInfo`` — the Windows equivalent of macOS
+        ``CGEventSourceSecondsSinceLastEventType``.  No listener threads or
+        special permissions required.
+        """
+        lii = _LASTINPUTINFO(ctypes.sizeof(_LASTINPUTINFO))
+        self._user32.GetLastInputInfo(ctypes.byref(lii))
+        elapsed_ms = self._kernel32.GetTickCount() - lii.dwTime
+        return max(0, elapsed_ms) / 1000.0
 
     def reset_idle(self) -> None:
-        """Reset the idle timer (e.g. when returning from lunch)."""
-        self.last_activity_time = time.time()
+        """Reset the system idle timer by injecting a zero-delta mouse event.
 
-    def _move_linear(self, x0: int, y0: int, x1: int, y1: int) -> None:
-        """Interpolate cursor from (x0, y0) to (x1, y1) in small steps."""
-        for i in range(1, _MOVE_STEPS + 1):
-            ix = int(x0 + (x1 - x0) * i / _MOVE_STEPS)
-            iy = int(y0 + (y1 - y0) * i / _MOVE_STEPS)
-            self._user32.SetCursorPos(ix, iy)
-            time.sleep(_STEP_SLEEP)
-
-    def _press_random_key(self) -> None:
-        """Press and release one key chosen at random from the safe pool.
-
-        All keys in ``_SAFE_KEYS`` are modifiers or unbound function keys —
-        they produce no visible character or UI effect but register as user
-        input, resetting Teams' idle timer.  Only called when
-        ``SEND_KEYSTROKES`` is True.
+        ``GetLastInputInfo`` tracks real injected input, so the only reliable
+        way to reset it is to actually post an input event — which
+        ``nudge_mouse()`` already does.
         """
-        vk = random.choice(_SAFE_KEYS)
-        self._user32.keybd_event(vk, 0, 0, 0)                  # key down
-        time.sleep(0.05)
-        self._user32.keybd_event(vk, 0, _KEYEVENTF_KEYUP, 0)   # key up
+        self._send_zero_move()
+
+    # ── Nudge ─────────────────────────────────────────────────────────────────
 
     def nudge_mouse(self) -> None:
-        """Move the cursor slightly, return it to origin, then optionally tap a key."""
-        pt = _POINT()
-        self._user32.GetCursorPos(ctypes.byref(pt))
-        ox, oy = pt.x, pt.y
+        """Inject a zero-delta mouse move via SendInput to reset the system
+        idle timer without moving the cursor visibly.
 
-        tx = max(0, min(self._screen_w - 1, ox + random.randint(-MOVE_DISTANCE_PIXELS, MOVE_DISTANCE_PIXELS)))
-        ty = max(0, min(self._screen_h - 1, oy + random.randint(-MOVE_DISTANCE_PIXELS, MOVE_DISTANCE_PIXELS)))
+        ``SendInput`` posts a real HID-level mouse event into the input stream,
+        resetting ``GetLastInputInfo`` (and Teams' idle timer) without any
+        visible cursor movement.
+        """
+        self._send_zero_move()
 
-        self._bot_moving = True
-        try:
-            self._move_linear(ox, oy, tx, ty)
-            time.sleep(0.05)
-            self._move_linear(tx, ty, ox, oy)
-        finally:
-            self._bot_moving = False
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
-        if SEND_KEYSTROKES:
-            self._press_random_key()
+    def _send_zero_move(self) -> None:
+        """Post a MOUSEEVENTF_MOVE with dx=0, dy=0 via SendInput.
+
+        This injects a real HID-level mouse event into the input stream,
+        resetting ``GetLastInputInfo`` (and Teams' idle timer) without any
+        visible cursor movement.
+        """
+        inp = _INPUT(
+            type=_INPUT_MOUSE,
+            _input=_INPUT._INPUT_UNION(
+                mi=_MOUSEINPUT(
+                    dx=0,
+                    dy=0,
+                    mouseData=0,
+                    dwFlags=_MOUSEEVENTF_MOVE,
+                    time=0,
+                    dwExtraInfo=None,
+                )
+            ),
+        )
+        self._user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+
+    # ── Cleanup ───────────────────────────────────────────────────────────────
 
     def cleanup(self) -> None:
-        """Restore normal execution state and stop input listeners."""
-        ctypes.windll.kernel32.SetThreadExecutionState(_ES_CONTINUOUS)
-        self._mouse_listener.stop()
-        self._kbd_listener.stop()
+        """Restore normal execution state."""
+        self._kernel32.SetThreadExecutionState(_ES_CONTINUOUS)

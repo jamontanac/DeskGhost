@@ -1,14 +1,8 @@
-import random
 import subprocess
 import time
 from typing import Optional
 
-import pyautogui
 import Quartz
-
-from deskghost.schedule import MOVE_DISTANCE_PIXELS
-
-_screen_w, _screen_h = pyautogui.size()
 
 # CGEventSource constants — query system-wide HID idle time with no
 # Input Monitoring or Accessibility permission required.
@@ -17,11 +11,15 @@ _ANY_EVENT = Quartz.kCGAnyInputEventType               # any input event type
 
 
 class ActivityWatcher:
-    """Watches for user input and nudges the mouse when the user is idle.
+    """Watches for user input and nudges the system when the user is idle.
 
     Uses ``CGEventSourceSecondsSinceLastEventType`` (no Input Monitoring
-    permission required) for idle detection and ``pyautogui`` for smooth
-    cursor movement with return-to-origin behaviour.
+    or Accessibility permission required) for idle detection.
+
+    Nudging is done by posting a ``kCGEventMouseMoved`` CGEvent at the
+    current cursor position with zero delta — this resets the HID idle
+    timer (and therefore Teams' presence timer) without any visible cursor
+    movement.  Technique mirrors Caffeine's ActivitySimulator.
     """
 
     def __init__(self) -> None:
@@ -46,14 +44,27 @@ class ActivityWatcher:
         self._reset_time = time.time()
 
     def nudge_mouse(self) -> None:
-        """Move the cursor slightly and return it to its original position."""
-        ox, oy = pyautogui.position()
-        tx = max(0, min(_screen_w - 1, ox + random.randint(-MOVE_DISTANCE_PIXELS, MOVE_DISTANCE_PIXELS)))
-        ty = max(0, min(_screen_h - 1, oy + random.randint(-MOVE_DISTANCE_PIXELS, MOVE_DISTANCE_PIXELS)))
+        """Post a zero-movement CGEvent to reset the HID idle timer.
 
-        pyautogui.moveTo(tx, ty, duration=0.2)
-        time.sleep(0.05)
-        pyautogui.moveTo(ox, oy, duration=0.2)
+        Creates a ``kCGEventMouseMoved`` event at the current cursor position
+        (zero delta) and posts it to ``kCGHIDEventTap``.  The cursor does not
+        move visually, but the HID idle timer — and therefore Teams' presence
+        timer — is reset.
+
+        Requires Accessibility permission (AX) to inject into the HID stream.
+        """
+        # Read the current cursor position from the HID event source
+        src_event = Quartz.CGEventCreate(None)
+        pos = Quartz.CGEventGetLocation(src_event)
+
+        # Create and post a mouseMoved event at the exact same position
+        move_event = Quartz.CGEventCreateMouseEvent(
+            None,
+            Quartz.kCGEventMouseMoved,
+            pos,
+            Quartz.kCGMouseButtonLeft,
+        )
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, move_event)
 
     def prevent_display_sleep(self) -> None:
         """Assert a display-sleep-prevention power claim via caffeinate.

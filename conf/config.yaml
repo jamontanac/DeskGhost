@@ -10,35 +10,26 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 nudge:
-  # How long the user must be idle (seconds) before nudging starts.
-  idle_time_seconds: 120
+    # How long the user must be idle (seconds) before nudging starts.
+    idle_time_seconds: 120
 
-  # Seconds between consecutive nudges while the user remains idle.
-  move_interval_seconds: 5
-
-  # Maximum cursor offset in pixels per nudge (cursor returns to origin after).
-  move_distance_pixels: 20
+    # Seconds between consecutive nudges while the user remains idle.
+    move_interval_seconds: 5
 
 schedule:
-  # HH:MM — bot starts operating at this time; also used as the scheduled task
-  # trigger time (setup.sh / setup.ps1 read this value at install time).
-  work_start: "07:00"
+    # HH:MM — bot starts operating at this time; also used as the scheduled task
+    # trigger time (setup.sh / setup.ps1 read this value at install time).
+    work_start: "07:00"
 
-  # HH:MM — bot self-exits at this time.
-  work_end: "18:00"
+    # HH:MM — bot self-exits at this time.
+    work_end: "23:00"
 
-  # Days of the week the bot is active. 0 = Monday … 4 = Friday, 6 = Sunday.
-  work_days: [0, 1, 2, 3, 4]
+    # Days of the week the bot is active. 0 = Monday … 4 = Friday, 6 = Sunday.
+    work_days: [0, 1, 2, 3, 4]
 
 lunch:
-  # HH:MM — start of the lunch break (bot nudges silently during this window).
-  start: "12:30"
+    # HH:MM — start of the lunch break (bot nudges silently during this window).
+    start: "12:30"
 
-  # Length of the lunch break in minutes.
-  duration_minutes: 60
-
-windows:
-  # Set to false on corporate machines with strict EDR (CrowdStrike,
-  # SentinelOne, etc.) to rely on mouse movement only and avoid keystroke
-  # heuristics.  Has no effect on macOS.
-  send_keystrokes: true
+    # Length of the lunch break in minutes.
+    duration_minutes: 60
