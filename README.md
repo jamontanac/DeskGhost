@@ -1,11 +1,32 @@
 # DeskGhost
 
-Silently keeps your presence alive on Teams (and similar apps) by nudging
-the mouse and tapping a harmless key whenever you go idle. Runs only during
-configured work hours and self-exits when the day is over.
+Silently keeps your presence alive on Teams (and similar apps) by injecting
+a zero-movement input event whenever you go idle. Runs only during configured
+work hours and self-exits when the day is over.
 
 Supports **macOS** and **Windows**. A single command runs the right code for
 your platform automatically.
+
+---
+
+## How it works
+
+DeskGhost watches the OS-level idle timer — the same counter Teams reads to
+decide whether to show you as Away. When you have been idle long enough it
+posts a synthetic input event that resets the timer, keeping Teams green.
+
+| Platform | Idle detection | Nudge mechanism |
+|---|---|---|
+| macOS | `CGEventSourceSecondsSinceLastEventType` (Quartz) | `CGEventCreateMouseEvent(kCGEventMouseMoved)` posted to `kCGHIDEventTap` — cursor does not move |
+| Windows | `GetLastInputInfo` (user32) | `SendInput` with `MOUSEEVENTF_MOVE` dx=0 dy=0 — cursor does not move |
+
+On both platforms the cursor **never moves visibly**. No keystrokes are
+injected. The events go directly into the HID input stream, which is what the
+OS idle timer and Teams both observe.
+
+During lunch, DeskGhost pauses input simulation but keeps the display awake
+(macOS: `caffeinate -d`; Windows: `SetThreadExecutionState`) so the screen
+does not lock while you are away from your desk.
 
 ---
 
@@ -38,7 +59,6 @@ Edit that file and re-run `install` to apply changes — no Python editing requi
 nudge:
   idle_time_seconds: 120       # how long idle before nudging starts
   move_interval_seconds: 5     # seconds between nudges while idle
-  move_distance_pixels: 20     # maximum cursor offset per nudge
 
 schedule:
   work_start: "07:00"          # bot starts at this time; also the scheduled task trigger
@@ -48,25 +68,11 @@ schedule:
 lunch:
   start: "12:30"               # lunch begins
   duration_minutes: 60         # lunch duration
-
-windows:
-  send_keystrokes: true        # Windows only — see note below
 ```
 
 `work_start` is used as **both** the in-process work-hours boundary and the
 scheduled task trigger time. Changing it and re-running `install` updates the
 LaunchAgent / Task Scheduler trigger automatically — no manual plist/XML editing.
-
-### `send_keystrokes` (Windows only)
-
-When `true`, each nudge also presses and releases one key chosen at random
-from a pool of silent modifiers and unbound function keys (Ctrl, Shift, Alt,
-Scroll Lock, F13–F15). These produce no visible output but register as user
-activity, which is what Teams tracks.
-
-Set to `false` if your corporate endpoint security (CrowdStrike,
-SentinelOne, etc.) flags keystroke simulation. Mouse movement alone is
-usually enough to reset the idle timer.
 
 ---
 
@@ -87,6 +93,20 @@ Logs are printed to the terminal and also written to
 `~/.deskghost/logs/deskghost.log`.
 
 Press `Ctrl+C` to stop.
+
+---
+
+## macOS — Accessibility permission
+
+DeskGhost needs the **Accessibility** permission to post events into the HID
+stream. Without it the nudge runs silently but Teams will still go idle.
+
+**System Settings → Privacy & Security → Accessibility** — add the Python
+executable printed in the startup warning, then reinstall:
+
+```bash
+bash scripts/setup.sh uninstall && bash scripts/setup.sh install
+```
 
 ---
 
@@ -125,7 +145,7 @@ bash scripts/setup.sh install
 # Verify it is loaded
 bash scripts/setup.sh status
 
-# Test it right now without waiting for 07:00
+# Test it right now without waiting for work_start
 bash scripts/setup.sh run-now
 
 # View logs
@@ -181,8 +201,8 @@ Regardless of how DeskGhost is started, output is always written to:
 When started via the scheduler, stdout and stderr are also captured to:
 
 ```
-~/.deskghost/logs/stdout.log   (macOS / Windows)
-~/.deskghost/logs/stderr.log   (macOS / Windows)
+~/.deskghost/logs/stdout.log
+~/.deskghost/logs/stderr.log
 ```
 
 Log format: `[HH:MM:SS] [LEVEL] message`
@@ -194,23 +214,29 @@ Log format: `[HH:MM:SS] [LEVEL] message`
 ```
 src/deskghost/
 ├── main.py          # entry point — detects OS and delegates
+├── config.py        # loads conf/config.yaml and exposes typed constants
 ├── lock.py          # cross-platform single-instance file lock
-├── schedule.py      # all configuration constants + work-hours logic
+├── schedule.py      # work-hours / lunch logic
 ├── logger.py        # shared logger + ThrottledLogger
 ├── macos/
-│   └── watcher.py   # macOS: Quartz (CGEventSource) + pyautogui
+│   └── watcher.py   # macOS: Quartz CGEvent nudge, caffeinate display lock
 └── windows/
-    └── watcher.py   # Windows: ctypes (user32/kernel32), no pyautogui
+    └── watcher.py   # Windows: ctypes SendInput nudge, SetThreadExecutionState
 
 scripts/
 ├── setup.sh         # macOS installer (launchd LaunchAgent)
 └── setup.ps1        # Windows installer (Task Scheduler)
 
+conf/
+└── config.yaml      # all user-facing settings
+
 tests/
 ├── conftest.py
+├── test_config.py
 ├── test_schedule.py
 ├── test_logger.py
 ├── test_main.py
+├── test_install.py
 ├── macos/test_watcher.py   # runs on macOS only
 └── windows/test_watcher.py # runs on Windows only
 ```
@@ -230,7 +256,7 @@ watcher tests skip on Windows and vice versa.
 ### Installation verification tests
 
 `tests/test_install.py` contains a suite of tests that verify the OS-level
-scheduler integration is correctly configured.  These tests **skip
+scheduler integration is correctly configured. These tests **skip
 automatically** when the agent / task has not been installed on the current
 machine, so a clean development environment always produces a clean run.
 
@@ -253,19 +279,16 @@ Run them explicitly at any time to confirm your install is healthy:
 uv run pytest tests/test_install.py -v
 ```
 
-If a test fails it prints a precise message explaining what is wrong and
-which command to re-run to fix it.
-
 ---
 
 ## Security and antivirus considerations
 
-- **Do not package this as a standalone `.exe`** using PyInstaller or
-  similar tools. Packed Python binaries that simulate input are near-certain
-  to trigger AV heuristics. Running via `uv run deskghost` from source is
-  the safe approach.
-- **Corporate EDR (CrowdStrike, SentinelOne, etc.)** uses behaviour-based
-  detection. If keystroke simulation is flagged, set `SEND_KEYSTROKES = False`
-  in `schedule.py` to fall back to mouse-only mode.
+- **No keystrokes are ever injected.** DeskGhost uses zero-delta mouse events
+  exclusively (`CGEvent` on macOS, `SendInput` on Windows). These are
+  indistinguishable from the cursor sitting still, which means EDR tools
+  (CrowdStrike, SentinelOne, etc.) have nothing behaviour-based to flag.
+- **Do not package this as a standalone `.exe`** using PyInstaller or similar
+  tools. Packed Python binaries that simulate input are near-certain to trigger
+  AV heuristics. Running via `uv run deskghost` from source is the safe approach.
 - Use this tool at your own discretion and in accordance with your
   organisation's policies.
