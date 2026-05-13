@@ -18,6 +18,7 @@
 #   bash scripts/setup.sh run-now    # run DeskGhost immediately (for testing)
 #   bash scripts/setup.sh status     # check whether the agent is loaded
 #   bash scripts/setup.sh logs       # tail the log files
+#   bash scripts/setup.sh clean      # stop running instance, delete logs and lock file
 # =============================================================================
 
 set -euo pipefail
@@ -214,6 +215,104 @@ cmd_logs() {
     fi
 }
 
+cmd_clean() {
+    local LOCK_FILE="$HOME/.deskghost/deskghost.lock"
+    local LOG_FILE="${LOG_DIR}/deskghost.log"
+    local LOG_FILE_1="${LOG_DIR}/deskghost.log.1"
+
+    # ── Discover what exists ───────────────────────────────────────────────────
+
+    local pid=""
+    local pid_alive=false
+
+    if [[ -f "$LOCK_FILE" ]]; then
+        local raw
+        raw="$(cat "$LOCK_FILE" 2>/dev/null || true)"
+        if [[ "$raw" =~ ^[0-9]+$ ]]; then
+            pid="$raw"
+            if kill -0 "$pid" 2>/dev/null; then
+                pid_alive=true
+            fi
+        fi
+    fi
+
+    # Build the list of actions to display
+    local actions=()
+    local has_work=false
+
+    if [[ "$pid_alive" == true ]]; then
+        actions+=("  [kill]   PID ${pid} (deskghost process)")
+        has_work=true
+    fi
+
+    for f in "$LOG_FILE" "$LOG_FILE_1"; do
+        if [[ -f "$f" ]]; then
+            local size
+            size="$(du -sh "$f" 2>/dev/null | cut -f1)"
+            actions+=("  [delete] ${f}  (${size})")
+            has_work=true
+        fi
+    done
+
+    if [[ -f "$LOCK_FILE" ]]; then
+        if [[ "$pid_alive" == false ]]; then
+            # Stale or unreadable PID — delete silently without prompting
+            rm -f "$LOCK_FILE"
+        else
+            actions+=("  [delete] ${LOCK_FILE}")
+        fi
+    fi
+
+    # ── Nothing to do ─────────────────────────────────────────────────────────
+
+    if [[ "$has_work" == false ]]; then
+        green "Nothing to clean."
+        return 0
+    fi
+
+    # ── Show summary and prompt ────────────────────────────────────────────────
+
+    yellow "The following actions will be taken:"
+    for action in "${actions[@]}"; do
+        yellow "$action"
+    done
+    echo ""
+    printf "Proceed? [y/N] "
+    read -r reply
+    echo ""
+
+    if [[ ! "$reply" =~ ^[Yy]$ ]]; then
+        yellow "Aborted. Nothing was changed."
+        return 0
+    fi
+
+    # ── Execute ───────────────────────────────────────────────────────────────
+
+    if [[ "$pid_alive" == true ]]; then
+        kill -TERM "$pid" 2>/dev/null || true
+        # Wait up to 3 seconds for graceful exit, then SIGKILL
+        local waited=0
+        while kill -0 "$pid" 2>/dev/null && (( waited < 3 )); do
+            sleep 1
+            (( waited++ )) || true
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -KILL "$pid" 2>/dev/null || true
+            green "PID ${pid} force-killed (SIGKILL)."
+        else
+            green "PID ${pid} stopped."
+        fi
+        rm -f "$LOCK_FILE"
+    fi
+
+    for f in "$LOG_FILE" "$LOG_FILE_1"; do
+        if [[ -f "$f" ]]; then
+            rm -f "$f"
+            green "Deleted: ${f}"
+        fi
+    done
+}
+
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
 case "${1:-}" in
@@ -222,8 +321,9 @@ case "${1:-}" in
     run-now)   cmd_run_now   ;;
     status)    cmd_status    ;;
     logs)      cmd_logs      ;;
+    clean)     cmd_clean     ;;
     *)
-        echo "Usage: bash scripts/setup.sh [install|uninstall|run-now|status|logs]"
+        echo "Usage: bash scripts/setup.sh [install|uninstall|run-now|status|logs|clean]"
         exit 1
         ;;
 esac
