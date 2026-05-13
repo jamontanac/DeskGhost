@@ -81,8 +81,9 @@ def _run() -> int:
     if not _is_accessibility_trusted():
         log.warning("=" * 55)
         log.warning("  ACCESSIBILITY PERMISSION NOT GRANTED")
-        log.warning("  CGEventPost cannot inject into the HID stream — mouse")
-        log.warning("  simulation will run but Teams will still go idle.")
+        log.warning("  Accessibility permission not granted — CGEventPost cannot")
+        log.warning("  inject HID events to reset the idle timer.")
+        log.warning("  Teams (and similar apps) will still go idle.")
         log.warning("  Fix: System Settings → Privacy & Security → Accessibility")
         log.warning(f"  Add: {sys.executable}")
         log.warning("  Then: bash scripts/setup.sh uninstall && bash scripts/setup.sh install")

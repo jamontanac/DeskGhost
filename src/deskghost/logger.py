@@ -1,11 +1,12 @@
 import logging
 import pathlib
 import time
+from logging.handlers import RotatingFileHandler
 
 LOG_INTERVAL_SECONDS = 60
 
 _FMT = "[%(asctime)s] [%(levelname)-5s] %(message)s"
-_DATEFMT = "%H:%M:%S"
+_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
 
 def get_logger(name: str = "deskghost") -> logging.Logger:
@@ -37,10 +38,15 @@ def configure_file_logging(log_dir: pathlib.Path | None = None) -> pathlib.Path:
     logger = get_logger()
     # Avoid attaching a duplicate FileHandler if called more than once
     for h in logger.handlers:
-        if isinstance(h, logging.FileHandler) and h.baseFilename == str(log_file):
+        if isinstance(h, RotatingFileHandler) and h.baseFilename == str(log_file):
             return log_file
 
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=5 * 1024 * 1024,
+        backupCount=1,
+        encoding="utf-8",
+    )
     file_handler.setFormatter(logging.Formatter(_FMT, datefmt=_DATEFMT))
     logger.addHandler(file_handler)
 
