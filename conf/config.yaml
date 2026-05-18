@@ -24,7 +24,7 @@ schedule:
     work_start: "08:00"
 
     # HH:MM — base end of the work window.
-    work_end: "18:00"
+    work_end: "17:00"
 
     # Base active weekdays. 0 = Monday ... 6 = Sunday.
     work_days: [0, 1, 2, 3, 4]
@@ -38,12 +38,12 @@ schedule:
     # - enabled: true enables a day even if NOT listed in work_days.
     # - work_start/work_end override only that day's window.
     day_overrides:
-        4:   # Friday
-            work_end: "14:00"
+        4: # Friday
+            work_end: "16:00"
 
 lunch:
     # HH:MM — start of the lunch break (bot nudges silently during this window).
-    start: "12:30"
+    start: "13:00"
 
     # Length of the lunch break in minutes.
     duration_minutes: 60
