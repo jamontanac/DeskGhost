@@ -4,7 +4,7 @@
 #
 # Registers a launchd LaunchAgent that starts DeskGhost:
 #   • immediately on login/session start (RunAtLoad), AND
-#   • at the configured work-start time Mon–Fri (StartCalendarInterval).
+#   • at configured schedule start times (StartCalendarInterval).
 #
 # DeskGhost self-exits when outside work hours, so a login-time launch
 # outside working hours is harmless.  A PID lock inside the app prevents
@@ -48,23 +48,39 @@ require_uv() {
     fi
 }
 
-read_work_start() {
-    # Read WORK_START_TIME from conf/config.yaml via Python so we have a single
-    # source of truth.  Outputs two space-separated integers: "<hour> <minute>".
+read_trigger_entries() {
+    # Read local scheduler trigger entries from config (single source of truth).
+    # Outputs one line per trigger: "<weekday> <hour> <minute>" where weekday
+    # uses Python numbering (0=Mon ... 6=Sun).
     "$UV_PATH" run --project "$PROJECT_ROOT" python -c \
-        "from deskghost.config import WORK_START_TIME; print(WORK_START_TIME[0], WORK_START_TIME[1])"
+        "from deskghost.config import get_local_scheduler_trigger_entries; [print(f'{d} {h} {m}') for d, h, m in get_local_scheduler_trigger_entries()]"
+}
+
+read_trigger_entries_pretty() {
+    "$UV_PATH" run --project "$PROJECT_ROOT" python -c \
+        "from deskghost.config import get_local_scheduler_trigger_entries; days=('Mon','Tue','Wed','Thu','Fri','Sat','Sun'); [print(f'{days[d]} {h:02d}:{m:02d}') for d, h, m in get_local_scheduler_trigger_entries()]"
 }
 
 write_plist() {
     mkdir -p "$(dirname "$PLIST_DST")"
     mkdir -p "$LOG_DIR"
 
-    # Read trigger time from config (single source of truth: conf/config.yaml)
-    local work_start
-    work_start="$(read_work_start)"
-    local WORK_HOUR WORK_MINUTE
-    WORK_HOUR="$(echo "$work_start"  | cut -d' ' -f1)"
-    WORK_MINUTE="$(echo "$work_start" | cut -d' ' -f2)"
+    # Read trigger entries from config (single source of truth: conf/config.yaml)
+    local trigger_entries
+    trigger_entries="$(read_trigger_entries)"
+    if [[ -z "$trigger_entries" ]]; then
+        red "Error: no enabled schedule days found in conf/config.yaml."
+        red "Enable at least one weekday in schedule.work_days or schedule.day_overrides."
+        exit 1
+    fi
+
+    local START_CALENDAR_XML=""
+    local PY_DAY WORK_HOUR WORK_MINUTE WEEKDAY
+    while IFS=' ' read -r PY_DAY WORK_HOUR WORK_MINUTE; do
+        [[ -z "$PY_DAY" ]] && continue
+        WEEKDAY=$((PY_DAY + 1))
+        START_CALENDAR_XML+=$'\n        <dict><key>Weekday</key><integer>'"${WEEKDAY}"$'</integer><key>Hour</key><integer>'"${WORK_HOUR}"$'</integer><key>Minute</key><integer>'"${WORK_MINUTE}"$'</integer></dict>'
+    done <<< "$trigger_entries"
 
     cat > "$PLIST_DST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -89,14 +105,9 @@ write_plist() {
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- Also fire at work_start time (read from conf/config.yaml) on every weekday -->
+    <!-- Also fire at configured schedule start times (read from conf/config.yaml) -->
     <key>StartCalendarInterval</key>
-    <array>
-        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>${WORK_HOUR}</integer><key>Minute</key><integer>${WORK_MINUTE}</integer></dict>
-        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>${WORK_HOUR}</integer><key>Minute</key><integer>${WORK_MINUTE}</integer></dict>
-        <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>${WORK_HOUR}</integer><key>Minute</key><integer>${WORK_MINUTE}</integer></dict>
-        <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>${WORK_HOUR}</integer><key>Minute</key><integer>${WORK_MINUTE}</integer></dict>
-        <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>${WORK_HOUR}</integer><key>Minute</key><integer>${WORK_MINUTE}</integer></dict>
+    <array>${START_CALENDAR_XML}
     </array>
 
     <!-- Do not restart automatically — the app self-exits after work hours -->
@@ -148,7 +159,11 @@ cmd_install() {
     green "  uv        : ${UV_PATH}"
     green "  project   : ${PROJECT_ROOT}"
     green "  logs      : ${LOG_DIR}"
-    green "DeskGhost will start automatically at $(read_work_start | awk '{printf "%02d:%02d", $1, $2}') Mon–Fri."
+    green "DeskGhost will start at login and configured schedule start times (local clock)."
+    yellow "Configured local triggers:"
+    while IFS= read -r line; do
+        yellow "  ${line}"
+    done <<< "$(read_trigger_entries_pretty)"
     echo ""
     yellow "────────────────────────────────────────────────────────"
     yellow "  ACTION REQUIRED — Accessibility permission"

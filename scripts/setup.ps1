@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
     DeskGhost Windows installer — manages a Task Scheduler task that starts
-    DeskGhost at login AND at the configured work-start time Mon–Fri.
+    DeskGhost at login AND at configured schedule start times.
 
 .DESCRIPTION
     DeskGhost self-exits when outside work hours, so a login-time launch
@@ -75,15 +75,43 @@ function Task-Exists {
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
-function Get-WorkStart {
-    # Read WORK_START_TIME from conf/config.yaml via Python — single source of truth.
-    # Returns a string like "07:00" suitable for New-ScheduledTaskTrigger -At.
-    $uvPath = Get-UvPath
-    $result = & $uvPath run --project $ProjectRoot python -c @'
-from deskghost.config import WORK_START_TIME
-print(f"{WORK_START_TIME[0]:02d}:{WORK_START_TIME[1]:02d}")
+function Get-TriggerEntries {
+    param([string]$UvPath)
+
+    # Read local scheduler trigger entries from config (single source of truth).
+    # Each line is: "<weekday> <hour> <minute>" where weekday uses Python numbering
+    # (0=Mon ... 6=Sun).
+    $lines = & $UvPath run --project $ProjectRoot python -c @'
+from deskghost.config import get_local_scheduler_trigger_entries
+for day, hour, minute in get_local_scheduler_trigger_entries():
+    print(f"{day} {hour} {minute}")
 '@
-    return $result.Trim()
+
+    $entries = @()
+    foreach ($line in $lines) {
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+        $parts = $line.Trim().Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
+        if ($parts.Length -ne 3) {
+            throw "Unexpected trigger entry format from Python: '$line'"
+        }
+        $entries += [pscustomobject]@{
+            Weekday = [int]$parts[0]
+            Hour    = [int]$parts[1]
+            Minute  = [int]$parts[2]
+        }
+    }
+    return $entries
+}
+
+function Format-TriggerEntriesPretty {
+    param([array]$Entries)
+
+    $dayNames = @("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+    return $Entries |
+        Sort-Object Weekday, Hour, Minute |
+        ForEach-Object { "{0} {1:00}:{2:00}" -f $dayNames[$_.Weekday], $_.Hour, $_.Minute }
 }
 
 function Invoke-Install {
@@ -111,11 +139,36 @@ function Invoke-Install {
     # Triggers:
     #   1. At user logon — ensures DeskGhost starts even if the machine was off
     #      or asleep when the time-based trigger was supposed to fire.
-    #   2. Weekly at work_start time Mon–Fri — fires on time when machine is on.
+    #   2. Weekly at configured schedule start times — fires on time when machine is on.
     # StartWhenAvailable means the time-based trigger also fires on wake if missed.
-    $workStart   = Get-WorkStart
-    $triggerTime = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At $workStart
+    $triggerEntries = @(Get-TriggerEntries -UvPath $uvPath)
+    if ($triggerEntries.Count -eq 0) {
+        Write-Red "Error: no enabled schedule days found in conf/config.yaml."
+        Write-Red "Enable at least one weekday in schedule.work_days or schedule.day_overrides."
+        exit 1
+    }
+
+    $dayMap = @{
+        0 = "Monday"
+        1 = "Tuesday"
+        2 = "Wednesday"
+        3 = "Thursday"
+        4 = "Friday"
+        5 = "Saturday"
+        6 = "Sunday"
+    }
+
+    $triggerTime = @()
+    foreach ($entry in $triggerEntries) {
+        if (-not $dayMap.ContainsKey($entry.Weekday)) {
+            throw "Invalid weekday from config trigger conversion: $($entry.Weekday)"
+        }
+        $at = "{0:00}:{1:00}" -f $entry.Hour, $entry.Minute
+        $triggerTime += New-ScheduledTaskTrigger -Weekly -DaysOfWeek $dayMap[$entry.Weekday] -At $at
+    }
+
     $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
+    $allTriggers = @($triggerLogon) + $triggerTime
 
     # Settings: run only when user is logged on, limited privilege (no elevation)
     $settings = New-ScheduledTaskSettingsSet `
@@ -131,7 +184,7 @@ function Invoke-Install {
     Register-ScheduledTask `
         -TaskName  $TaskName `
         -Action    $action `
-        -Trigger   @($triggerLogon, $triggerTime) `
+        -Trigger   $allTriggers `
         -Settings  $settings `
         -Principal $principal `
         -Force | Out-Null
@@ -141,7 +194,11 @@ function Invoke-Install {
     Write-Green "  uv        : $uvPath"
     Write-Green "  project   : $ProjectRoot"
     Write-Green "  logs      : $LogDir"
-    Write-Green "DeskGhost will start at login and at $workStart Mon-Fri."
+    Write-Green "DeskGhost will start at login and configured schedule start times (local clock)."
+    Write-Yellow "Configured local triggers:"
+    Format-TriggerEntriesPretty -Entries $triggerEntries | ForEach-Object {
+        Write-Yellow "  $_"
+    }
     Write-Yellow "To test right now run:  .\scripts\setup.ps1 run-now"
 }
 
