@@ -173,7 +173,7 @@ class TestDisplaySleep:
             mock_popen.assert_called_once()
             args = mock_popen.call_args[0][0]
             assert args[0] == "caffeinate"
-            assert "-d" in args
+            assert "-di" in args
 
     def test_prevent_display_sleep_does_not_restart_if_already_running(self):
         fake_quartz = _make_fake_quartz()
