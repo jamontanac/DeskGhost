@@ -5,12 +5,15 @@ import time
 from deskghost.lock import InstanceLock
 from deskghost.logger import ThrottledLogger, configure_file_logging, get_logger
 from deskghost.schedule import (
+    DAY_OVERRIDES,
     IDLE_TIME_SECONDS,
     LUNCH_DURATION_MINUTES,
     LUNCH_START_TIME,
     MOVE_INTERVAL_SECONDS,
+    SCHEDULE_TIMEZONE_LABEL,
     WORK_END_TIME,
     WORK_START_TIME,
+    WORK_DAYS,
     is_lunch_time,
     is_work_hours,
 )
@@ -58,14 +61,34 @@ def _run() -> int:
     log_file = configure_file_logging()
     throttled = ThrottledLogger()
     watcher = ActivityWatcher()
+    day_labels = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+    base_days = ", ".join(day_labels[day] for day in sorted(WORK_DAYS)) or "none"
 
     log.info("=" * 55)
     log.info("  DeskGhost started")
+    log.info(f"  Schedule TZ: {SCHEDULE_TIMEZONE_LABEL}")
     log.info(
-        f"  Work hours : Mon-Fri  "
+        f"  Base hours : "
         f"{WORK_START_TIME[0]:02d}:{WORK_START_TIME[1]:02d} -> "
-        f"{WORK_END_TIME[0]:02d}:{WORK_END_TIME[1]:02d}"
+        f"{WORK_END_TIME[0]:02d}:{WORK_END_TIME[1]:02d} "
+        f"({base_days})"
     )
+    if DAY_OVERRIDES:
+        log.info("  Day overrides:")
+        for day in sorted(DAY_OVERRIDES):
+            override = DAY_OVERRIDES[day]
+            parts: list[str] = []
+            if "enabled" in override:
+                parts.append(f"enabled={override['enabled']}")
+            if "work_start" in override:
+                parts.append(
+                    f"start={override['work_start'][0]:02d}:{override['work_start'][1]:02d}"
+                )
+            if "work_end" in override:
+                parts.append(
+                    f"end={override['work_end'][0]:02d}:{override['work_end'][1]:02d}"
+                )
+            log.info(f"    {day_labels[day]}: {', '.join(parts)}")
     log.info(
         f"  Lunch      : {LUNCH_START_TIME[0]:02d}:{LUNCH_START_TIME[1]:02d}  "
         f"for {LUNCH_DURATION_MINUTES} min"

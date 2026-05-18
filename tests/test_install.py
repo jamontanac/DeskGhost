@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,16 @@ def _project_root() -> Path:
 
 
 PROJECT_ROOT = _project_root()
+
+
+def _expected_local_trigger_entries() -> list[tuple[int, int, int]]:
+    """Return expected local scheduler entries from current config.
+
+    Tuple format: (weekday, hour, minute) where weekday is 0=Mon ... 6=Sun.
+    """
+    from deskghost.config import get_local_scheduler_trigger_entries
+
+    return get_local_scheduler_trigger_entries()
 
 # ---------------------------------------------------------------------------
 # macOS tests
@@ -88,35 +99,16 @@ class TestMacOSLaunchAgent:
         plist = self._parse_plist()
         assert plist.get("KeepAlive") is False
 
-    def test_plist_has_five_weekday_calendar_entries(self):
-        """StartCalendarInterval must have exactly 5 entries (Mon–Fri)."""
+    def test_plist_calendar_entries_match_effective_schedule(self):
+        """StartCalendarInterval must match config-derived local trigger entries."""
         plist = self._parse_plist()
         entries = plist.get("StartCalendarInterval", [])
-        assert len(entries) == 5, (
-            f"Expected 5 weekday entries in StartCalendarInterval, got {len(entries)}"
+        actual = sorted((int(entry["Weekday"]) - 1, int(entry["Hour"]), int(entry["Minute"])) for entry in entries)
+        expected = sorted(_expected_local_trigger_entries())
+        assert actual == expected, (
+            f"Plist StartCalendarInterval entries {actual} do not match expected {expected}. "
+            "Re-run 'bash scripts/setup.sh install' after changing conf/config.yaml."
         )
-
-    def test_plist_calendar_hour_matches_config(self):
-        """The Hour in the plist must match WORK_START_TIME from conf/config.yaml."""
-        from deskghost.config import WORK_START_TIME
-        plist = self._parse_plist()
-        entries = plist.get("StartCalendarInterval", [])
-        for entry in entries:
-            assert entry["Hour"] == WORK_START_TIME[0], (
-                f"Plist Hour {entry['Hour']} does not match config {WORK_START_TIME[0]}. "
-                "Re-run 'bash scripts/setup.sh install' after changing conf/config.yaml."
-            )
-
-    def test_plist_calendar_minute_matches_config(self):
-        """The Minute in the plist must match WORK_START_TIME from conf/config.yaml."""
-        from deskghost.config import WORK_START_TIME
-        plist = self._parse_plist()
-        entries = plist.get("StartCalendarInterval", [])
-        for entry in entries:
-            assert entry["Minute"] == WORK_START_TIME[1], (
-                f"Plist Minute {entry['Minute']} does not match config {WORK_START_TIME[1]}. "
-                "Re-run 'bash scripts/setup.sh install' after changing conf/config.yaml."
-            )
 
     def test_plist_working_directory_points_to_project(self):
         plist = self._parse_plist()
@@ -191,6 +183,45 @@ class TestWindowsScheduledTask:
         assert result.returncode == 0, f"schtasks /query failed: {result.stderr}"
         return result.stdout
 
+    def _calendar_entries_from_xml(self) -> list[tuple[int, int, int]]:
+        """Return (weekday, hour, minute) entries from task XML CalendarTrigger nodes."""
+        xml = self._query_xml()
+        root = ET.fromstring(xml)
+
+        ns_uri = ""
+        if root.tag.startswith("{"):
+            ns_uri = root.tag[1:].split("}", 1)[0]
+        ns = {"ns": ns_uri} if ns_uri else {}
+
+        def q(tag: str) -> str:
+            return f"ns:{tag}" if ns else tag
+
+        day_map = {
+            "Monday": 0,
+            "Tuesday": 1,
+            "Wednesday": 2,
+            "Thursday": 3,
+            "Friday": 4,
+            "Saturday": 5,
+            "Sunday": 6,
+        }
+
+        entries: list[tuple[int, int, int]] = []
+        for trigger in root.findall(f".//{q('CalendarTrigger')}", ns):
+            start = trigger.find(q("StartBoundary"), ns)
+            if start is None or not start.text or "T" not in start.text:
+                continue
+            time_part = start.text.split("T", 1)[1][:5]
+            hour, minute = (int(part) for part in time_part.split(":"))
+
+            day_nodes = trigger.findall(f"{q('ScheduleByWeek')}/{q('DaysOfWeek')}/*", ns)
+            for node in day_nodes:
+                raw = node.tag.split("}", 1)[-1]
+                if raw in day_map:
+                    entries.append((day_map[raw], hour, minute))
+
+        return sorted(entries)
+
     def test_task_exists(self):
         assert _windows_task_exists()
 
@@ -208,6 +239,14 @@ class TestWindowsScheduledTask:
         assert "CalendarTrigger" in xml or "ScheduleByWeek" in xml, (
             "No CalendarTrigger found in task XML. "
             "Re-run '.\\scripts\\setup.ps1 install'."
+        )
+
+    def test_task_calendar_entries_match_effective_schedule(self):
+        actual = self._calendar_entries_from_xml()
+        expected = sorted(_expected_local_trigger_entries())
+        assert actual == expected, (
+            f"Task calendar entries {actual} do not match expected {expected}. "
+            "Re-run '.\\scripts\\setup.ps1 install' after changing conf/config.yaml."
         )
 
     def test_task_start_when_available(self):

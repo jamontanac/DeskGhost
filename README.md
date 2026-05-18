@@ -61,18 +61,40 @@ nudge:
   move_interval_seconds: 5     # seconds between nudges while idle
 
 schedule:
-  work_start: "07:00"          # bot starts at this time; also the scheduled task trigger
-  work_end:   "18:00"          # bot self-exits at this time
-  work_days:  [0, 1, 2, 3, 4] # 0=Mon … 4=Fri
+  work_start: "08:00"          # base start time
+  work_end:   "18:00"          # base end time
+  work_days:  [0, 1, 2, 3, 4]   # base enabled days (0=Mon ... 6=Sun)
+  timezone: "America/Bogota"   # optional IANA timezone; defaults to local machine timezone
+  day_overrides:
+    4:                          # Friday
+      work_end: "14:00"        # shorten Friday
+    2:                          # Wednesday
+      enabled: false            # disable this day
+    5:                          # Saturday
+      enabled: true             # enable weekend work
+      work_start: "09:00"
+      work_end: "12:00"
 
 lunch:
   start: "12:30"               # lunch begins
   duration_minutes: 60         # lunch duration
 ```
 
-`work_start` is used as **both** the in-process work-hours boundary and the
-scheduled task trigger time. Changing it and re-running `install` updates the
-LaunchAgent / Task Scheduler trigger automatically — no manual plist/XML editing.
+Rule precedence:
+
+- Base schedule comes from `work_days`, `work_start`, `work_end`.
+- `day_overrides[weekday]` is merged on top.
+- `enabled: false` disables that day even if it is in `work_days`.
+- `enabled: true` enables that day even if it is not in `work_days`.
+- If only one time bound is overridden, the other bound comes from base schedule.
+
+Timezone behavior:
+
+- Work and lunch checks run in `schedule.timezone` if set, otherwise local machine timezone.
+- Install scripts convert the effective schedule into local OS trigger times.
+- After any schedule change, re-run install:
+  - macOS: `bash scripts/setup.sh uninstall && bash scripts/setup.sh install`
+  - Windows: `.\scripts\setup.ps1 uninstall` then `.\scripts\setup.ps1 install`
 
 ---
 
@@ -117,11 +139,14 @@ The setup scripts register DeskGhost to start automatically in **two ways**:
 1. **At login / session start** — so DeskGhost is running from the moment you
    open your laptop, even if you missed the time-based trigger because the
    machine was off or asleep.
-2. **At the `work_start` time** Mon–Fri — as a belt-and-suspenders trigger for
-   days when the machine is already on at that time.
+2. **At configured schedule start times** — as a belt-and-suspenders trigger
+   for days when the machine is already on at that time.
 
 DeskGhost self-exits when `work_end` is reached (or immediately if started
 outside work hours), so a login-time start on a weekend or evening is harmless.
+
+Configured start triggers are derived from the effective schedule (base days,
+day overrides, and timezone) and converted to local OS scheduler times.
 
 ### Single-instance guarantee
 
@@ -145,7 +170,7 @@ bash scripts/setup.sh install
 # Verify it is loaded
 bash scripts/setup.sh status
 
-# Test it right now without waiting for work_start
+# Test it right now without waiting for a scheduled trigger
 bash scripts/setup.sh run-now
 
 # View logs
@@ -267,8 +292,8 @@ check that:
 - The plist / scheduled task file exists and is valid.
 - `RunAtLoad` is set (macOS) / a `LogonTrigger` is present (Windows) so
   DeskGhost starts on every login.
-- The time-based trigger hour and minute match `conf/config.yaml` — no
-  drift if you edit the config and forget to reinstall.
+- Time-based trigger weekday/hour/minute entries match the effective local
+  scheduler entries derived from `conf/config.yaml`.
 - The `~/.deskghost/` directory exists and is writable (required for the
   lock file and logs).
 - The agent is actually loaded in launchctl (macOS).
