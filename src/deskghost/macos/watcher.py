@@ -69,14 +69,14 @@ class ActivityWatcher:
     def prevent_display_sleep(self) -> None:
         """Assert a display-sleep-prevention power claim via caffeinate.
 
-        Uses ``caffeinate -d`` which holds a
+        Uses ``caffeinate -di`` which holds a
         ``kIOPMAssertionTypePreventUserIdleDisplaySleep`` IOKit assertion
         without generating any HID events, so Teams (and similar apps) will
         still see the user as idle/away.
         """
         if self._caffeinate_proc is None or self._caffeinate_proc.poll() is not None:
             self._caffeinate_proc = subprocess.Popen(
-                ["caffeinate", "-d"],
+                ["caffeinate", "-di"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
