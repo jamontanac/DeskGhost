@@ -4,9 +4,12 @@
 #   macOS   → bash scripts/setup.sh install     (re-registers the LaunchAgent)
 #   Windows → .\scripts\setup.ps1 install       (re-registers the Scheduled Task)
 #
-# work_start is used as *both* the in-process work-hours boundary and the
-# scheduled-task trigger time, so the OS wakes the bot at exactly the right
-# moment.
+# Scheduler triggers are derived from the effective schedule (base days,
+# per-day overrides, and optional timezone) and converted to local OS time
+# when you run the install scripts.
+#
+# Optional: set schedule.timezone to evaluate work/lunch windows in another
+# region using an IANA timezone name (for example, America/Bogota).
 # ─────────────────────────────────────────────────────────────────────────────
 
 nudge:
@@ -17,15 +20,26 @@ nudge:
     move_interval_seconds: 5
 
 schedule:
-    # HH:MM — bot starts operating at this time; also used as the scheduled task
-    # trigger time (setup.sh / setup.ps1 read this value at install time).
-    work_start: "07:00"
+    # HH:MM — base start of the work window.
+    work_start: "08:00"
 
-    # HH:MM — bot self-exits at this time.
-    work_end: "23:00"
+    # HH:MM — base end of the work window.
+    work_end: "18:00"
 
-    # Days of the week the bot is active. 0 = Monday … 4 = Friday, 6 = Sunday.
+    # Base active weekdays. 0 = Monday ... 6 = Sunday.
     work_days: [0, 1, 2, 3, 4]
+
+    # Optional named timezone used for schedule/lunch checks.
+    # If omitted, DeskGhost uses the machine local timezone.
+    timezone: "America/Bogota"
+
+    # Optional per-day overrides.
+    # - enabled: false disables a day even if listed in work_days.
+    # - enabled: true enables a day even if NOT listed in work_days.
+    # - work_start/work_end override only that day's window.
+    day_overrides:
+        4:   # Friday
+            work_end: "14:00"
 
 lunch:
     # HH:MM — start of the lunch break (bot nudges silently during this window).
