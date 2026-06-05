@@ -1,4 +1,5 @@
 import ctypes
+import os
 import sys
 import time
 
@@ -107,9 +108,9 @@ def _run() -> int:
         log.warning("  Accessibility permission not granted — CGEventPost cannot")
         log.warning("  inject HID events to reset the idle timer.")
         log.warning("  Teams (and similar apps) will still go idle.")
-        log.warning("  Fix: System Settings → Privacy & Security → Accessibility")
-        log.warning(f"  Add: {sys.executable}")
-        log.warning("  Then: bash scripts/setup.sh uninstall && bash scripts/setup.sh install")
+        log.warning("  Run this to open the permission dialog automatically:")
+        log.warning("    bash scripts/setup.sh grant-ax")
+        log.warning("  Then re-run: bash scripts/setup.sh uninstall && bash scripts/setup.sh install")
         log.warning("=" * 55)
 
     in_lunch = False

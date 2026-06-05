@@ -1,6 +1,5 @@
 import ctypes
 import ctypes.wintypes
-import time
 
 # ── SetThreadExecutionState flags ─────────────────────────────────────────────
 _ES_CONTINUOUS       = 0x80000000

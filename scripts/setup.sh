@@ -149,10 +149,10 @@ cmd_install() {
     write_plist
     launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"
 
-    # Resolve the Python interpreter the venv will actually use so we can
-    # show the user exactly which binary to add to Accessibility.
+    # Resolve the real Python binary (follow symlinks) so we can show the
+    # user exactly which path to paste into the Accessibility picker.
     local PY_BIN
-    PY_BIN="$("$UV_PATH" run --no-env-file python -c 'import sys; print(sys.executable)' 2>/dev/null || echo "(unknown — run: uv run python -c 'import sys; print(sys.executable)')")"
+    PY_BIN="$("$UV_PATH" run --no-env-file python -c 'import os, sys; print(os.path.realpath(sys.executable))' 2>/dev/null || echo "(unknown — run: uv run python -c 'import os,sys; print(os.path.realpath(sys.executable))')")"
 
     green "LaunchAgent installed."
     green "  plist     : ${PLIST_DST}"
@@ -173,7 +173,7 @@ cmd_install() {
     yellow ""
     yellow "  1. Open:  System Settings → Privacy & Security → Accessibility"
     yellow "  2. Click the lock to make changes, then click  +"
-    yellow "  3. Add this binary:"
+    yellow "  3. In the file picker press Cmd+Shift+G (Go to Folder) and paste:"
     yellow "       ${PY_BIN}"
     yellow "  4. Re-run:  bash scripts/setup.sh uninstall && bash scripts/setup.sh install"
     yellow "────────────────────────────────────────────────────────"
@@ -328,6 +328,76 @@ cmd_clean() {
     done
 }
 
+cmd_grant_ax() {
+    require_uv
+
+    # Check if already trusted
+    local TRUSTED
+    TRUSTED="$("$UV_PATH" run --project "$PROJECT_ROOT" python -c "
+import ctypes
+try:
+    lib = ctypes.CDLL('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
+    lib.AXIsProcessTrusted.restype = ctypes.c_bool
+    print('yes' if lib.AXIsProcessTrusted() else 'no')
+except Exception:
+    print('unknown')
+" 2>/dev/null)"
+
+    if [[ "$TRUSTED" == "yes" ]]; then
+        green "Accessibility permission is already granted."
+        green "Re-run to apply: bash scripts/setup.sh uninstall && bash scripts/setup.sh install"
+        return 0
+    fi
+
+    yellow "Requesting Accessibility permission..."
+    yellow "A macOS dialog will appear — click 'Open System Settings',"
+    yellow "then enable the toggle next to the entry."
+    echo ""
+
+    # AXIsProcessTrustedWithOptions with prompt=true triggers the native macOS
+    # dialog that asks the user to grant Accessibility access.  This must be
+    # called from a process with a GUI session (terminal), not from the daemon.
+    "$UV_PATH" run --project "$PROJECT_ROOT" python - <<'PYEOF'
+import ctypes
+
+cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+ax = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+
+# Build { kAXTrustedCheckOptionPrompt: kCFBooleanTrue } using CF type callbacks
+# so CoreFoundation can safely retain/describe the keys and values.
+key_cbs = ctypes.c_void_p.in_dll(cf, "kCFTypeDictionaryKeyCallBacks")
+val_cbs = ctypes.c_void_p.in_dll(cf, "kCFTypeDictionaryValueCallBacks")
+
+cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+key = cf.CFStringCreateWithCString(None, b"AXTrustedCheckOptionPrompt", 0x08000100)
+
+cf_bool_true = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue")
+
+cf.CFDictionaryCreate.restype = ctypes.c_void_p
+cf.CFDictionaryCreate.argtypes = [
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p),
+    ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p,
+]
+key_ptr = ctypes.c_void_p(key)
+val_ptr = ctypes.c_void_p(cf_bool_true.value)
+options = cf.CFDictionaryCreate(
+    None,
+    ctypes.byref(key_ptr), ctypes.byref(val_ptr), 1,
+    ctypes.addressof(key_cbs), ctypes.addressof(val_cbs),
+)
+
+ax.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
+ax.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
+ax.AXIsProcessTrustedWithOptions(options)
+PYEOF
+
+    echo ""
+    yellow "Once you have enabled the toggle, re-run:"
+    yellow "  bash scripts/setup.sh uninstall && bash scripts/setup.sh install"
+}
+
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
 case "${1:-}" in
@@ -337,8 +407,9 @@ case "${1:-}" in
     status)    cmd_status    ;;
     logs)      cmd_logs      ;;
     clean)     cmd_clean     ;;
+    grant-ax)  cmd_grant_ax  ;;
     *)
-        echo "Usage: bash scripts/setup.sh [install|uninstall|run-now|status|logs|clean]"
+        echo "Usage: bash scripts/setup.sh [install|uninstall|run-now|status|logs|clean|grant-ax]"
         exit 1
         ;;
 esac

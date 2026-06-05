@@ -11,7 +11,17 @@ dependencies = [
     "pyyaml>=6.0",
     "tzdata>=2025.2",
     "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+    "pyrefly>=1.0.0",
 ]
+
+[tool.pyrefly]
+python-version = "3.13"
+python-interpreter-path = ".venv/bin/python"
+search-path = ["."]
+site-package-path = [".venv/lib/python3.13/site-packages"]
+
+# Files to type check (replaces Pyright's include)
+project-includes = ["src", "tests"]
 
 [project.scripts]
 deskghost = "deskghost.main:main"

@@ -90,6 +90,7 @@ class TestIdleTracking:
         before = time.time()
         w.reset_idle()
         after = time.time()
+        assert w._reset_time is not None
         assert before <= w._reset_time <= after
 
     def test_reset_idle_makes_idle_time_near_zero(self):

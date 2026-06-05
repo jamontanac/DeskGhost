@@ -22,7 +22,7 @@ class ActivityWatcher:
     movement.  Technique mirrors Caffeine's ActivitySimulator.
     """
 
-    def __init__(self) -> None:
+    def __init__(self):
         self._reset_time: Optional[float] = None
         self._caffeinate_proc: Optional[subprocess.Popen] = None
 

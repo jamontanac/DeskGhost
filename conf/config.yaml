@@ -14,14 +14,14 @@
 
 nudge:
     # How long the user must be idle (seconds) before nudging starts.
-    idle_time_seconds: 120
+    idle_time_seconds: 90
 
     # Seconds between consecutive nudges while the user remains idle.
     move_interval_seconds: 5
 
 schedule:
     # HH:MM — base start of the work window.
-    work_start: "08:00"
+    work_start: "07:30"
 
     # HH:MM — base end of the work window.
     work_end: "17:00"
