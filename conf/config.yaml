@@ -1,8 +1,8 @@
 # DeskGhost configuration
 # ─────────────────────────────────────────────────────────────────────────────
 # Edit this file to tune behaviour, then:
-#   macOS   → bash scripts/setup.sh install     (re-registers the LaunchAgent)
-#   Windows → .\scripts\setup.ps1 install       (re-registers the Scheduled Task)
+#   macOS   → bash scripts/setup.sh install-source     (re-registers the LaunchAgent)
+#   Windows → .\scripts\setup.ps1 install-source       (re-registers the Scheduled Task)
 #
 # Scheduler triggers are derived from the effective schedule (base days,
 # per-day overrides, and optional timezone) and converted to local OS time
