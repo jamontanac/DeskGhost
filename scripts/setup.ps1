@@ -1,33 +1,38 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DeskGhost Windows installer — manages a Task Scheduler task that starts
-    DeskGhost at login AND at configured schedule start times.
+    Unified DeskGhost Windows setup/build/package tool.
 
 .DESCRIPTION
-    DeskGhost self-exits when outside work hours, so a login-time launch
-    outside working hours is harmless.  A PID lock inside the app prevents
-    double-launch when both triggers fire for the same session (e.g. the
-    machine wakes from sleep with DeskGhost already running and the scheduler
-    fires the missed trigger via StartWhenAvailable).
+    Interactive mode (no args):
+      .\scripts\setup.ps1
 
-.PARAMETER Action
-    install    Register the scheduled task
-    uninstall  Remove the scheduled task
-    run-now    Run DeskGhost immediately (for testing)
-    status     Show whether the task exists and its last run result
-    logs       Tail the log files
+    Non-interactive actions:
+      .\scripts\setup.ps1 install-source
+      .\scripts\setup.ps1 install-packaged [binary-or-folder-path]
+      .\scripts\setup.ps1 build
+      .\scripts\setup.ps1 package
+      .\scripts\setup.ps1 run-now-source
+      .\scripts\setup.ps1 run-now-packaged [binary-or-folder-path]
+      .\scripts\setup.ps1 status
+      .\scripts\setup.ps1 logs
+      .\scripts\setup.ps1 clean
+      .\scripts\setup.ps1 uninstall
 
-.EXAMPLE
-    .\scripts\setup.ps1 install
-    .\scripts\setup.ps1 run-now
-    .\scripts\setup.ps1 logs
+    Backward-compatible aliases:
+      install -> install-source
+      run-now -> run-now-source
 #>
 
 param(
-    [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet("install", "uninstall", "run-now", "status", "logs")]
-    [string]$Action
+    [Parameter(Position = 0)]
+    [string]$Action = "",
+
+    [Parameter(Position = 1)]
+    [string]$Arg1 = "",
+
+    [Parameter(Position = 2)]
+    [string]$Arg2 = ""
 )
 
 Set-StrictMode -Version Latest
@@ -40,20 +45,23 @@ $LogDir     = Join-Path $HOME ".deskghost\logs"
 $StdoutLog  = Join-Path $LogDir "stdout.log"
 $StderrLog  = Join-Path $LogDir "stderr.log"
 
-# Project root = parent of the directory containing this script
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$BuildDir    = Join-Path $ProjectRoot "build\windows"
+$ReleaseDir  = Join-Path $ProjectRoot "build\release\windows"
+
+$script:PromptUser = $false
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-function Write-Green  { param([string]$Msg) Write-Host $Msg -ForegroundColor Green  }
-function Write-Red    { param([string]$Msg) Write-Host $Msg -ForegroundColor Red    }
+function Write-Green  { param([string]$Msg) Write-Host $Msg -ForegroundColor Green }
+function Write-Red    { param([string]$Msg) Write-Host $Msg -ForegroundColor Red }
 function Write-Yellow { param([string]$Msg) Write-Host $Msg -ForegroundColor Yellow }
 
 function Get-UvPath {
     try {
-        $uv = (Get-Command uv -ErrorAction Stop).Source
-        return $uv
-    } catch {
+        return (Get-Command uv -ErrorAction Stop).Source
+    }
+    catch {
         Write-Red "Error: 'uv' not found on PATH."
         Write-Red "Install it from https://docs.astral.sh/uv/getting-started/installation/"
         exit 1
@@ -66,6 +74,10 @@ function Assert-ProjectRoot {
         Write-Red "Run this script from inside the deskghost repository."
         exit 1
     }
+    if (-not (Test-Path (Join-Path $ProjectRoot "conf\config.yaml"))) {
+        Write-Red "Error: conf\config.yaml not found in $ProjectRoot"
+        exit 1
+    }
 }
 
 function Task-Exists {
@@ -73,14 +85,60 @@ function Task-Exists {
     return ($null -ne $task)
 }
 
-# ── Commands ──────────────────────────────────────────────────────────────────
+function Get-InstalledMode {
+    if (-not (Task-Exists)) {
+        return "unknown"
+    }
+
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    $actions = @($task.Actions)
+    if ($null -eq $task -or $actions.Count -eq 0) {
+        return "unknown"
+    }
+
+    $actionArgs = [string]$actions[0].Arguments
+    if ($actionArgs -match '\brun\s+deskghost\b') {
+        return "source"
+    }
+
+    return "packaged"
+}
+
+function Remove-BuildArtifacts {
+    $removedAny = $false
+
+    foreach ($dir in @($BuildDir, $ReleaseDir)) {
+        if (Test-Path $dir) {
+            Remove-Item -Recurse -Force $dir
+            Write-Green "Deleted: $dir"
+            $removedAny = $true
+        }
+    }
+
+    if (-not $removedAny) {
+        Write-Yellow "No build artifacts found under $(Join-Path $ProjectRoot 'build')."
+    }
+}
+
+function Get-Version {
+    $uvPath = Get-UvPath
+
+    Push-Location $ProjectRoot
+    try {
+        $version = & $uvPath run --project $ProjectRoot python -c "import pathlib,tomllib; d=tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8')); print(d.get('project',{}).get('version','0.0.0'))" 2>$null
+        if ([string]::IsNullOrWhiteSpace($version)) {
+            return "0.0.0"
+        }
+        return $version.Trim()
+    }
+    finally {
+        Pop-Location
+    }
+}
 
 function Get-TriggerEntries {
     param([string]$UvPath)
 
-    # Read local scheduler trigger entries from config (single source of truth).
-    # Each line is: "<weekday> <hour> <minute>" where weekday uses Python numbering
-    # (0=Mon ... 6=Sun).
     $lines = & $UvPath run --project $ProjectRoot python -c @'
 from deskghost.config import get_local_scheduler_trigger_entries
 for day, hour, minute in get_local_scheduler_trigger_entries():
@@ -114,33 +172,101 @@ function Format-TriggerEntriesPretty {
         ForEach-Object { "{0} {1:00}:{2:00}" -f $dayNames[$_.Weekday], $_.Hour, $_.Minute }
 }
 
-function Invoke-Install {
+function Find-PackagedBinary {
+    param([string]$Hint)
+
+    if (-not [string]::IsNullOrWhiteSpace($Hint)) {
+        if ((Test-Path $Hint) -and (Get-Item $Hint).PSIsContainer) {
+            $preferred = Join-Path $Hint "DeskGhost.exe"
+            if (Test-Path $preferred) {
+                return (Resolve-Path $preferred).Path
+            }
+            $any = Get-ChildItem -Path $Hint -File -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($any) {
+                return $any.FullName
+            }
+        }
+        elseif ((Test-Path $Hint) -and -not (Get-Item $Hint).PSIsContainer) {
+            return (Resolve-Path $Hint).Path
+        }
+        return $null
+    }
+
+    $defaultExe = Join-Path $BuildDir "DeskGhost.exe"
+    if (Test-Path $defaultExe) {
+        return (Resolve-Path $defaultExe).Path
+    }
+
+    if (-not (Test-Path $BuildDir)) {
+        return $null
+    }
+
+    $candidate = Get-ChildItem -Path $BuildDir -File -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($candidate) {
+        return $candidate.FullName
+    }
+
+    return $null
+}
+
+function Resolve-PackagedBinary {
+    param([string]$Hint)
+
+    $binaryPath = Find-PackagedBinary -Hint $Hint
+    if ([string]::IsNullOrWhiteSpace($binaryPath)) {
+        Write-Red "No packaged executable found."
+        Write-Yellow "Build first: .\scripts\setup.ps1 build"
+        exit 1
+    }
+
+    if (-not (Test-Path $binaryPath)) {
+        Write-Red "Packaged executable not found: $binaryPath"
+        exit 1
+    }
+
+    return $binaryPath
+}
+
+function New-DeskGhostAction {
+    param(
+        [ValidateSet("source", "packaged")]
+        [string]$Mode,
+        [string]$UvPath,
+        [string]$BinaryPath
+    )
+
+    if ($Mode -eq "source") {
+        $cmdLine = "`"$UvPath`" run deskghost >> `"$StdoutLog`" 2>> `"$StderrLog`""
+    }
+    else {
+        $cmdLine = "`"$BinaryPath`" >> `"$StdoutLog`" 2>> `"$StderrLog`""
+    }
+
+    return New-ScheduledTaskAction `
+        -Execute "cmd.exe" `
+        -Argument "/c $cmdLine" `
+        -WorkingDirectory $ProjectRoot
+}
+
+function Register-DeskGhostTask {
+    param(
+        [ValidateSet("source", "packaged")]
+        [string]$Mode,
+        [string]$BinaryPath = ""
+    )
+
     $uvPath = Get-UvPath
     Assert-ProjectRoot
 
-    # Ensure log directory exists
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
-    # Remove stale task if present
     if (Task-Exists) {
         Write-Yellow "Existing task found — replacing..."
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
     }
 
-    # The action wraps the command in cmd /c so stdout/stderr can be redirected
-    # to the log files.  cmd /c is the simplest cross-version way to do this
-    # without requiring extra modules.
-    $cmdLine = "`"$uvPath`" run deskghost >> `"$StdoutLog`" 2>> `"$StderrLog`""
-    $action  = New-ScheduledTaskAction `
-        -Execute  "cmd.exe" `
-        -Argument "/c $cmdLine" `
-        -WorkingDirectory $ProjectRoot
+    $action = New-DeskGhostAction -Mode $Mode -UvPath $uvPath -BinaryPath $BinaryPath
 
-    # Triggers:
-    #   1. At user logon — ensures DeskGhost starts even if the machine was off
-    #      or asleep when the time-based trigger was supposed to fire.
-    #   2. Weekly at configured schedule start times — fires on time when machine is on.
-    # StartWhenAvailable means the time-based trigger also fires on wake if missed.
     $triggerEntries = @(Get-TriggerEntries -UvPath $uvPath)
     if ($triggerEntries.Count -eq 0) {
         Write-Red "Error: no enabled schedule days found in conf/config.yaml."
@@ -170,7 +296,6 @@ function Invoke-Install {
     $triggerLogon = New-ScheduledTaskTrigger -AtLogOn -User ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
     $allTriggers = @($triggerLogon) + $triggerTime
 
-    # Settings: run only when user is logged on, limited privilege (no elevation)
     $settings = New-ScheduledTaskSettingsSet `
         -ExecutionTimeLimit (New-TimeSpan -Hours 12) `
         -MultipleInstances IgnoreNew `
@@ -182,41 +307,166 @@ function Invoke-Install {
         -RunLevel Limited
 
     Register-ScheduledTask `
-        -TaskName  $TaskName `
-        -Action    $action `
-        -Trigger   $allTriggers `
-        -Settings  $settings `
+        -TaskName $TaskName `
+        -Action $action `
+        -Trigger $allTriggers `
+        -Settings $settings `
         -Principal $principal `
         -Force | Out-Null
 
     Write-Green "Scheduled task registered."
     Write-Green "  task      : $TaskName"
-    Write-Green "  uv        : $uvPath"
+    Write-Green "  mode      : $Mode"
     Write-Green "  project   : $ProjectRoot"
     Write-Green "  logs      : $LogDir"
+    if ($Mode -eq "source") {
+        Write-Green "  uv        : $uvPath"
+    }
+    else {
+        Write-Green "  runtime   : $BinaryPath"
+    }
+
     Write-Green "DeskGhost will start at login and configured schedule start times (local clock)."
     Write-Yellow "Configured local triggers:"
     Format-TriggerEntriesPretty -Entries $triggerEntries | ForEach-Object {
         Write-Yellow "  $_"
     }
-    Write-Yellow "To test right now run:  .\scripts\setup.ps1 run-now"
 }
 
-function Invoke-Uninstall {
-    if (Task-Exists) {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-        Write-Green "Scheduled task removed."
-    } else {
-        Write-Yellow "Task '$TaskName' not found (already removed?)."
+# ── Commands ──────────────────────────────────────────────────────────────────
+
+function Invoke-Build {
+    $uvPath = Get-UvPath
+    Assert-ProjectRoot
+
+    New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+
+    Write-Yellow "Syncing dependencies..."
+    & $uvPath sync --project $ProjectRoot
+
+    Write-Yellow "Building Windows executable with Nuitka..."
+    Push-Location $ProjectRoot
+    try {
+        & $uvPath run --project $ProjectRoot --with nuitka python -m nuitka `
+            --standalone `
+            --output-dir=$BuildDir `
+            --output-filename=DeskGhost.exe `
+            --company-name="DeskGhost" `
+            --product-name="DeskGhost" `
+            --include-package=deskghost `
+            --include-data-files=conf/config.yaml=conf/config.yaml `
+            src/deskghost/main.py
+    }
+    finally {
+        Pop-Location
+    }
+
+    $distDir = Get-ChildItem -Path $BuildDir -Directory -Filter *.dist -ErrorAction SilentlyContinue | Select-Object -First 1
+    $exeFile = Find-PackagedBinary -Hint ""
+
+    Write-Green "Build complete."
+    Write-Yellow "Outputs:"
+    if ($exeFile) {
+        Write-Yellow "  $exeFile"
+    }
+    if ($distDir) {
+        Write-Yellow "  $($distDir.FullName)"
+    }
+    Write-Host ""
+    Write-Yellow "Smoke test command:"
+    if ($exeFile) {
+        Write-Yellow "  $exeFile"
     }
 }
 
-function Invoke-RunNow {
+function Invoke-Package {
+    Assert-ProjectRoot
+
+    if (-not (Test-Path $BuildDir)) {
+        Write-Red "Build directory not found: $BuildDir"
+        Write-Yellow "Build first: .\scripts\setup.ps1 build"
+        exit 1
+    }
+
+    $distDir = Get-ChildItem -Path $BuildDir -Directory -Filter *.dist -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $distDir) {
+        Write-Red "No *.dist directory found in $BuildDir"
+        Write-Yellow "Build first: .\scripts\setup.ps1 build"
+        exit 1
+    }
+
+    $version = Get-Version
+    $zipPath = Join-Path $ReleaseDir ("DeskGhost-windows-v{0}-portable.zip" -f $version)
+    $stageDir = Join-Path $ReleaseDir "DeskGhost"
+
+    New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
+
+    if (Test-Path $stageDir) {
+        Remove-Item -Recurse -Force $stageDir
+    }
+    New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+
+    Copy-Item -Recurse -Force (Join-Path $distDir.FullName "*") $stageDir
+
+    if (Test-Path $zipPath) {
+        Remove-Item -Force $zipPath
+    }
+    Compress-Archive -Path (Join-Path $stageDir "*") -DestinationPath $zipPath -Force
+
+    Write-Green "Packaging complete."
+    Write-Yellow "Dist folder: $($distDir.FullName)"
+    Write-Yellow "Artifact   : $zipPath"
+}
+
+function Invoke-InstallSource {
+    Register-DeskGhostTask -Mode source
+    Write-Yellow "To test right now run: .\scripts\setup.ps1 run-now-source"
+}
+
+function Invoke-InstallPackaged {
+    param([string]$BinaryPath)
+
+    $resolved = Resolve-PackagedBinary -Hint $BinaryPath
+    Register-DeskGhostTask -Mode packaged -BinaryPath $resolved
+    Write-Yellow "To test right now run: .\scripts\setup.ps1 run-now-packaged"
+}
+
+function Invoke-Uninstall {
+    $installedMode = Get-InstalledMode
+
+    if (Task-Exists) {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        Write-Green "Scheduled task removed."
+    }
+    else {
+        Write-Yellow "Task '$TaskName' not found (already removed?)."
+    }
+
+    if ($installedMode -eq "packaged") {
+        Write-Yellow "Packaged install detected. Removing build artifacts..."
+        Remove-BuildArtifacts
+    }
+}
+
+function Invoke-RunNowSource {
     $uvPath = Get-UvPath
     Assert-ProjectRoot
-    Write-Green "Starting DeskGhost now (Ctrl+C to stop)..."
-    Set-Location $ProjectRoot
-    & $uvPath run deskghost
+    Write-Green "Starting DeskGhost now in source mode (Ctrl+C to stop)..."
+    Push-Location $ProjectRoot
+    try {
+        & $uvPath run deskghost
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+function Invoke-RunNowPackaged {
+    param([string]$BinaryPath)
+
+    $resolved = Resolve-PackagedBinary -Hint $BinaryPath
+    Write-Green "Starting DeskGhost now in packaged mode (Ctrl+C to stop)..."
+    & $resolved
 }
 
 function Invoke-Status {
@@ -228,9 +478,10 @@ function Invoke-Status {
         Write-Host  "  Last run time   : $($info.LastRunTime)"
         Write-Host  "  Last result     : $($info.LastTaskResult)"
         Write-Host  "  Next run time   : $($info.NextRunTime)"
-    } else {
+    }
+    else {
         Write-Red "Task '$TaskName' is NOT registered."
-        Write-Yellow "Run:  .\scripts\setup.ps1 install"
+        Write-Yellow "Run: .\scripts\setup.ps1 install-source"
     }
 }
 
@@ -238,24 +489,194 @@ function Invoke-Logs {
     Write-Host "── stdout ($StdoutLog) ─────────────────────────────"
     if (Test-Path $StdoutLog) {
         Get-Content $StdoutLog -Tail 40
-    } else {
+    }
+    else {
         Write-Yellow "(no stdout log yet)"
     }
     Write-Host ""
     Write-Host "── stderr ($StderrLog) ─────────────────────────────"
     if (Test-Path $StderrLog) {
         Get-Content $StderrLog -Tail 20
-    } else {
+    }
+    else {
         Write-Yellow "(no stderr log yet)"
+    }
+}
+
+function Invoke-Clean {
+    $lockFile = Join-Path $HOME ".deskghost\deskghost.lock"
+    $logFile = Join-Path $LogDir "deskghost.log"
+    $logFile1 = Join-Path $LogDir "deskghost.log.1"
+
+    $pid = $null
+    $pidAlive = $false
+
+    if (Test-Path $lockFile) {
+        $raw = (Get-Content $lockFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if ($raw -match '^[0-9]+$') {
+            $pid = [int]$raw
+            $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+            if ($null -ne $proc) {
+                $pidAlive = $true
+            }
+        }
+    }
+
+    $actions = New-Object System.Collections.Generic.List[string]
+
+    if ($pidAlive) {
+        [void]$actions.Add("  [kill]   PID $pid (deskghost process)")
+    }
+
+    foreach ($f in @($logFile, $logFile1, $StdoutLog, $StderrLog)) {
+        if (Test-Path $f) {
+            [void]$actions.Add("  [delete] $f")
+        }
+    }
+
+    foreach ($dir in @($BuildDir, $ReleaseDir)) {
+        if (Test-Path $dir) {
+            [void]$actions.Add("  [delete] $dir")
+        }
+    }
+
+    if (Test-Path $lockFile -and $pidAlive) {
+        [void]$actions.Add("  [delete] $lockFile")
+    }
+
+    if ($actions.Count -eq 0) {
+        if (Test-Path $lockFile) {
+            Remove-Item -Force $lockFile -ErrorAction SilentlyContinue
+        }
+        Write-Green "Nothing to clean."
+        return
+    }
+
+    Write-Yellow "The following actions will be taken:"
+    $actions | ForEach-Object { Write-Yellow $_ }
+    Write-Host ""
+    $reply = Read-Host "Proceed? [y/N]"
+
+    if ($reply -notmatch '^[Yy]$') {
+        Write-Yellow "Aborted. Nothing was changed."
+        return
+    }
+
+    if ($pidAlive) {
+        Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+        Write-Green "PID $pid stopped."
+        if (Test-Path $lockFile) {
+            Remove-Item -Force $lockFile -ErrorAction SilentlyContinue
+        }
+    }
+
+    foreach ($f in @($logFile, $logFile1, $StdoutLog, $StderrLog)) {
+        if (Test-Path $f) {
+            Remove-Item -Force $f -ErrorAction SilentlyContinue
+            Write-Green "Deleted: $f"
+        }
+    }
+
+    foreach ($dir in @($BuildDir, $ReleaseDir)) {
+        if (Test-Path $dir) {
+            Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+            Write-Green "Deleted: $dir"
+        }
+    }
+}
+
+function Show-Usage {
+@"
+Usage: .\scripts\setup.ps1 [action] [arg1] [arg2]
+
+Actions:
+  install / install-source
+  install-packaged [binary-or-folder-path]
+  build
+  package
+  run-now / run-now-source
+  run-now-packaged [binary-or-folder-path]
+  status
+  logs
+  clean
+  uninstall
+  help
+
+No args starts interactive mode.
+"@ | Write-Host
+}
+
+function Show-Menu {
+    $script:PromptUser = $true
+
+    while ($true) {
+        Write-Host ""
+        Write-Yellow "DeskGhost Windows setup"
+        Write-Host "  1) Install task (source mode: uv run deskghost)"
+        Write-Host "  2) Build app (Nuitka)"
+        Write-Host "  3) Package built app (.zip)"
+        Write-Host "  4) Install task (packaged mode)"
+        Write-Host "  5) Run now (source mode)"
+        Write-Host "  6) Run now (packaged mode)"
+        Write-Host "  7) Status"
+        Write-Host "  8) Logs"
+        Write-Host "  9) Clean"
+        Write-Host " 10) Uninstall"
+        Write-Host "  0) Exit"
+
+        $choice = Read-Host "Choose an option [0-10]"
+
+        switch ($choice) {
+            "1" { Invoke-InstallSource }
+            "2" { Invoke-Build }
+            "3" { Invoke-Package }
+            "4" {
+                $path = Read-Host "Binary/folder path (leave empty to auto-detect)"
+                Invoke-InstallPackaged -BinaryPath $path
+            }
+            "5" { Invoke-RunNowSource }
+            "6" {
+                $path = Read-Host "Binary/folder path (leave empty to auto-detect)"
+                Invoke-RunNowPackaged -BinaryPath $path
+            }
+            "7" { Invoke-Status }
+            "8" { Invoke-Logs }
+            "9" { Invoke-Clean }
+            "10" { Invoke-Uninstall }
+            "0" { break }
+            default { Write-Red "Invalid option. Choose 0-10." }
+        }
     }
 }
 
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
-switch ($Action) {
-    "install"   { Invoke-Install   }
+if ([string]::IsNullOrWhiteSpace($Action)) {
+    Show-Menu
+    return
+}
+
+$actionName = $Action.ToLowerInvariant()
+
+switch ($actionName) {
+    "install" { Invoke-InstallSource }
+    "install-source" { Invoke-InstallSource }
+    "install-packaged" { Invoke-InstallPackaged -BinaryPath $Arg1 }
+    "build" { Invoke-Build }
+    "package" { Invoke-Package }
+    "run-now" { Invoke-RunNowSource }
+    "run-now-source" { Invoke-RunNowSource }
+    "run-now-packaged" { Invoke-RunNowPackaged -BinaryPath $Arg1 }
+    "status" { Invoke-Status }
+    "logs" { Invoke-Logs }
+    "clean" { Invoke-Clean }
     "uninstall" { Invoke-Uninstall }
-    "run-now"   { Invoke-RunNow    }
-    "status"    { Invoke-Status    }
-    "logs"      { Invoke-Logs      }
+    "help" { Show-Usage }
+    "-h" { Show-Usage }
+    "--help" { Show-Usage }
+    default {
+        Write-Red "Unknown action: $Action"
+        Show-Usage
+        exit 1
+    }
 }

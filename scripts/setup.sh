@@ -1,24 +1,27 @@
 #!/usr/bin/env bash
 # =============================================================================
-# setup.sh — DeskGhost macOS installer
+# setup.sh — Unified DeskGhost macOS setup/build/package tool
 #
-# Registers a launchd LaunchAgent that starts DeskGhost:
-#   • immediately on login/session start (RunAtLoad), AND
-#   • at configured schedule start times (StartCalendarInterval).
+# Interactive mode (no args):
+#   bash scripts/setup.sh
 #
-# DeskGhost self-exits when outside work hours, so a login-time launch
-# outside working hours is harmless.  A PID lock inside the app prevents
-# double-launch when both triggers fire for the same session (e.g. the
-# machine wakes from sleep with DeskGhost already running and the scheduler
-# fires the missed trigger).
+# Non-interactive actions:
+#   bash scripts/setup.sh install-source
+#   bash scripts/setup.sh install-packaged [binary-or-app-path]
+#   bash scripts/setup.sh build
+#   bash scripts/setup.sh package
+#   bash scripts/setup.sh run-now-source
+#   bash scripts/setup.sh run-now-packaged [binary-or-app-path]
+#   bash scripts/setup.sh status
+#   bash scripts/setup.sh logs
+#   bash scripts/setup.sh clean
+#   bash scripts/setup.sh uninstall
+#   bash scripts/setup.sh grant-ax [auto|source|packaged] [binary-or-app-path]
+#   bash scripts/setup.sh ax-status [auto|source|packaged] [binary-or-app-path]
 #
-# Usage:
-#   bash scripts/setup.sh install    # register the LaunchAgent
-#   bash scripts/setup.sh uninstall  # remove the LaunchAgent
-#   bash scripts/setup.sh run-now    # run DeskGhost immediately (for testing)
-#   bash scripts/setup.sh status     # check whether the agent is loaded
-#   bash scripts/setup.sh logs       # tail the log files
-#   bash scripts/setup.sh clean      # stop running instance, delete logs and lock file
+# Backward-compatible aliases:
+#   install  -> install-source
+#   run-now  -> run-now-source
 # =============================================================================
 
 set -euo pipefail
@@ -31,14 +34,24 @@ LOG_DIR="$HOME/.deskghost/logs"
 STDOUT_LOG="${LOG_DIR}/stdout.log"
 STDERR_LOG="${LOG_DIR}/stderr.log"
 
-# Project root is the directory that contains this script
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BUILD_DIR="${PROJECT_ROOT}/build/macos"
+RELEASE_DIR="${PROJECT_ROOT}/build/release/macos"
+
+PROMPT_USER=0
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 green()  { printf '\033[32m%s\033[0m\n' "$*"; }
 red()    { printf '\033[31m%s\033[0m\n' "$*"; }
 yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
+
+require_cmd() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        red "Error: required command not found: $1"
+        exit 1
+    fi
+}
 
 require_uv() {
     if ! UV_PATH="$(command -v uv 2>/dev/null)"; then
@@ -48,10 +61,26 @@ require_uv() {
     fi
 }
 
+assert_project_root() {
+    if [[ ! -f "${PROJECT_ROOT}/pyproject.toml" ]]; then
+        red "Error: pyproject.toml not found in ${PROJECT_ROOT}"
+        red "Run this script from inside the deskghost repository."
+        exit 1
+    fi
+    if [[ ! -f "${PROJECT_ROOT}/conf/config.yaml" ]]; then
+        red "Error: conf/config.yaml not found in ${PROJECT_ROOT}"
+        exit 1
+    fi
+}
+
+ensure_macos() {
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        red "This script only supports macOS."
+        exit 1
+    fi
+}
+
 read_trigger_entries() {
-    # Read local scheduler trigger entries from config (single source of truth).
-    # Outputs one line per trigger: "<weekday> <hour> <minute>" where weekday
-    # uses Python numbering (0=Mon ... 6=Sun).
     "$UV_PATH" run --project "$PROJECT_ROOT" python -c \
         "from deskghost.config import get_local_scheduler_trigger_entries; [print(f'{d} {h} {m}') for d, h, m in get_local_scheduler_trigger_entries()]"
 }
@@ -61,11 +90,324 @@ read_trigger_entries_pretty() {
         "from deskghost.config import get_local_scheduler_trigger_entries; days=('Mon','Tue','Wed','Thu','Fri','Sat','Sun'); [print(f'{days[d]} {h:02d}:{m:02d}') for d, h, m in get_local_scheduler_trigger_entries()]"
 }
 
+read_version() {
+    require_uv
+    local version
+    version="$(
+        cd "$PROJECT_ROOT" &&
+        "$UV_PATH" run --project "$PROJECT_ROOT" python -c "import pathlib,tomllib; d=tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8')); print(d.get('project',{}).get('version','0.0.0'))" 2>/dev/null || true
+    )"
+    if [[ -z "$version" ]]; then
+        echo "0.0.0"
+    else
+        echo "$version"
+    fi
+}
+
+agent_is_loaded() {
+    launchctl list "$LABEL" &>/dev/null
+}
+
+read_plist_program_arg() {
+    local index="$1"
+    if [[ ! -f "$PLIST_DST" ]]; then
+        return 0
+    fi
+    if [[ -x "/usr/libexec/PlistBuddy" ]]; then
+        /usr/libexec/PlistBuddy -c "Print :ProgramArguments:${index}" "$PLIST_DST" 2>/dev/null || true
+    fi
+}
+
+detect_installed_mode() {
+    local arg0 arg1 arg2
+    arg0="$(read_plist_program_arg 0)"
+    arg1="$(read_plist_program_arg 1)"
+    arg2="$(read_plist_program_arg 2)"
+
+    if [[ -z "$arg0" ]]; then
+        echo "unknown"
+        return 0
+    fi
+
+    if [[ "$arg1" == "run" && "$arg2" == "deskghost" ]]; then
+        echo "source"
+        return 0
+    fi
+
+    echo "packaged"
+}
+
+remove_build_outputs() {
+    local removed_any=false
+
+    if [[ -d "$BUILD_DIR" ]]; then
+        rm -rf "$BUILD_DIR"
+        green "Deleted: ${BUILD_DIR}"
+        removed_any=true
+    fi
+
+    if [[ -d "$RELEASE_DIR" ]]; then
+        rm -rf "$RELEASE_DIR"
+        green "Deleted: ${RELEASE_DIR}"
+        removed_any=true
+    fi
+
+    if [[ "$removed_any" == false ]]; then
+        yellow "No build artifacts found under ${PROJECT_ROOT}/build."
+    fi
+}
+
+detect_app_bundle() {
+    if [[ ! -d "$BUILD_DIR" ]]; then
+        return 0
+    fi
+    find "$BUILD_DIR" -maxdepth 1 -type d -name '*.app' | head -n 1 || true
+}
+
+find_packaged_binary() {
+    local hint="${1:-}"
+    local app_path=""
+
+    if [[ -n "$hint" ]]; then
+        if [[ -d "$hint" && "$hint" == *.app ]]; then
+            app_path="$hint"
+        elif [[ -f "$hint" ]]; then
+            echo "$hint"
+            return 0
+        else
+            return 0
+        fi
+    else
+        app_path="$(detect_app_bundle)"
+    fi
+
+    if [[ -z "$app_path" ]]; then
+        return 0
+    fi
+
+    if [[ -x "$app_path/Contents/MacOS/DeskGhost" ]]; then
+        echo "$app_path/Contents/MacOS/DeskGhost"
+        return 0
+    fi
+
+    find "$app_path/Contents/MacOS" -maxdepth 1 -type f | head -n 1 || true
+}
+
+resolve_packaged_binary() {
+    local hint="${1:-}"
+    local binary_path
+    binary_path="$(find_packaged_binary "$hint")"
+
+    if [[ -z "$binary_path" ]]; then
+        red "No packaged binary found."
+        yellow "Build first: bash scripts/setup.sh build"
+        return 1
+    fi
+
+    if [[ ! -f "$binary_path" ]]; then
+        red "Packaged binary path not found: $binary_path"
+        return 1
+    fi
+
+    if [[ ! -x "$binary_path" ]]; then
+        red "Packaged binary is not executable: $binary_path"
+        return 1
+    fi
+
+    echo "$binary_path"
+}
+
+source_python_binary() {
+    require_uv
+    "$UV_PATH" run --project "$PROJECT_ROOT" python -c 'import os,sys; print(os.path.realpath(sys.executable))' 2>/dev/null || true
+}
+
+ax_status_source() {
+    require_uv
+    "$UV_PATH" run --project "$PROJECT_ROOT" python -m deskghost.main --ax-status >/dev/null 2>&1
+}
+
+ax_status_packaged() {
+    local binary_path="$1"
+    "$binary_path" --ax-status >/dev/null 2>&1
+}
+
+resolve_ax_mode() {
+    local mode="${1:-auto}"
+    local hint="${2:-}"
+
+    case "$mode" in
+        source|packaged)
+            echo "$mode"
+            ;;
+        auto)
+            if [[ -n "$hint" ]]; then
+                echo "packaged"
+            else
+                local candidate
+                candidate="$(find_packaged_binary "")"
+                if [[ -n "$candidate" ]]; then
+                    echo "packaged"
+                else
+                    echo "source"
+                fi
+            fi
+            ;;
+        *)
+            red "Invalid AX mode: $mode"
+            red "Use: auto | source | packaged"
+            return 1
+            ;;
+    esac
+}
+
+cmd_ax_status() {
+    local mode
+    local mode_input="${1:-auto}"
+    local hint="${2:-}"
+    mode="$(resolve_ax_mode "$mode_input" "$hint")"
+
+    if [[ "$mode" == "source" ]]; then
+        if ax_status_source; then
+            green "AX status (source): trusted"
+            local py_bin
+            py_bin="$(source_python_binary)"
+            [[ -n "$py_bin" ]] && yellow "  runtime: $py_bin"
+            return 0
+        fi
+        yellow "AX status (source): not-trusted"
+        local py_bin
+        py_bin="$(source_python_binary)"
+        [[ -n "$py_bin" ]] && yellow "  runtime: $py_bin"
+        return 1
+    fi
+
+    local binary_path
+    binary_path="$(resolve_packaged_binary "$hint")"
+    if ax_status_packaged "$binary_path"; then
+        green "AX status (packaged): trusted"
+        yellow "  runtime: $binary_path"
+        return 0
+    fi
+
+    yellow "AX status (packaged): not-trusted"
+    yellow "  runtime: $binary_path"
+    return 1
+}
+
+cmd_grant_ax() {
+    ensure_macos
+
+    local mode
+    local mode_input="${1:-auto}"
+    local hint="${2:-}"
+    mode="$(resolve_ax_mode "$mode_input" "$hint")"
+
+    if [[ "$mode" == "source" ]]; then
+        require_uv
+        if ax_status_source; then
+            green "Accessibility permission is already granted for source runtime."
+            return 0
+        fi
+
+        yellow "Requesting Accessibility permission for source runtime..."
+        "$UV_PATH" run --project "$PROJECT_ROOT" python -m deskghost.main --request-ax >/dev/null 2>&1 || true
+
+        local py_bin
+        py_bin="$(source_python_binary)"
+        if [[ -n "$py_bin" ]]; then
+            yellow "Runtime binary: $py_bin"
+            if command -v pbcopy >/dev/null 2>&1; then
+                echo -n "$py_bin" | pbcopy
+                yellow "Runtime path copied to clipboard."
+            fi
+        fi
+
+        if ax_status_source; then
+            green "Accessibility permission granted for source runtime."
+        else
+            yellow "Accessibility still not granted for source runtime."
+            yellow "Open: System Settings -> Privacy & Security -> Accessibility"
+            yellow "Then allow the source runtime shown above."
+            open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" >/dev/null 2>&1 || true
+        fi
+        return 0
+    fi
+
+    local binary_path
+    binary_path="$(resolve_packaged_binary "$hint")"
+
+    if ax_status_packaged "$binary_path"; then
+        green "Accessibility permission is already granted for packaged runtime."
+        yellow "  runtime: $binary_path"
+        return 0
+    fi
+
+    yellow "Requesting Accessibility permission for packaged runtime..."
+    if command -v pbcopy >/dev/null 2>&1; then
+        echo -n "$binary_path" | pbcopy
+        yellow "Packaged runtime path copied to clipboard."
+    fi
+
+    "$binary_path" --request-ax >/dev/null 2>&1 || true
+
+    if ax_status_packaged "$binary_path"; then
+        green "Accessibility permission granted for packaged runtime."
+    else
+        yellow "Accessibility still not granted for packaged runtime."
+        yellow "Open: System Settings -> Privacy & Security -> Accessibility"
+        yellow "If needed, add this runtime path:"
+        yellow "  $binary_path"
+        open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" >/dev/null 2>&1 || true
+    fi
+}
+
+maybe_prompt_for_ax() {
+    local mode="$1"
+    local binary_path="${2:-}"
+
+    if [[ "$mode" == "source" ]]; then
+        if ax_status_source; then
+            return 0
+        fi
+        yellow "Accessibility permission is missing for source runtime."
+        if [[ "$PROMPT_USER" == "1" ]]; then
+            printf "Request Accessibility permission now? [Y/n] "
+            local reply
+            read -r reply
+            if [[ ! "$reply" =~ ^[Nn]$ ]]; then
+                cmd_grant_ax source
+            fi
+        else
+            yellow "Run: bash scripts/setup.sh grant-ax source"
+        fi
+        return 0
+    fi
+
+    if ax_status_packaged "$binary_path"; then
+        return 0
+    fi
+    yellow "Accessibility permission is missing for packaged runtime."
+    yellow "  runtime: $binary_path"
+    if [[ "$PROMPT_USER" == "1" ]]; then
+        printf "Request Accessibility permission now? [Y/n] "
+        local reply
+        read -r reply
+        if [[ ! "$reply" =~ ^[Nn]$ ]]; then
+            cmd_grant_ax packaged "$binary_path"
+        fi
+    else
+        yellow "Run: bash scripts/setup.sh grant-ax packaged ${binary_path}"
+    fi
+}
+
 write_plist() {
+    local runtime_mode="$1"
+    local binary_path="${2:-}"
+
     mkdir -p "$(dirname "$PLIST_DST")"
     mkdir -p "$LOG_DIR"
 
-    # Read trigger entries from config (single source of truth: conf/config.yaml)
     local trigger_entries
     trigger_entries="$(read_trigger_entries)"
     if [[ -z "$trigger_entries" ]]; then
@@ -82,6 +424,27 @@ write_plist() {
         START_CALENDAR_XML+=$'\n        <dict><key>Weekday</key><integer>'"${WEEKDAY}"$'</integer><key>Hour</key><integer>'"${WORK_HOUR}"$'</integer><key>Minute</key><integer>'"${WORK_MINUTE}"$'</integer></dict>'
     done <<< "$trigger_entries"
 
+    local PROGRAM_ARGS_XML
+    if [[ "$runtime_mode" == "source" ]]; then
+        PROGRAM_ARGS_XML="$(cat <<EOF
+    <key>ProgramArguments</key>
+    <array>
+        <string>${UV_PATH}</string>
+        <string>run</string>
+        <string>deskghost</string>
+    </array>
+EOF
+)"
+    else
+        PROGRAM_ARGS_XML="$(cat <<EOF
+    <key>ProgramArguments</key>
+    <array>
+        <string>${binary_path}</string>
+    </array>
+EOF
+)"
+    fi
+
     cat > "$PLIST_DST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -91,26 +454,18 @@ write_plist() {
     <key>Label</key>
     <string>${LABEL}</string>
 
-    <key>ProgramArguments</key>
-    <array>
-        <string>${UV_PATH}</string>
-        <string>run</string>
-        <string>deskghost</string>
-    </array>
+${PROGRAM_ARGS_XML}
 
     <key>WorkingDirectory</key>
     <string>${PROJECT_ROOT}</string>
 
-    <!-- Run immediately when the agent is loaded (login / session start) -->
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- Also fire at configured schedule start times (read from conf/config.yaml) -->
     <key>StartCalendarInterval</key>
     <array>${START_CALENDAR_XML}
     </array>
 
-    <!-- Do not restart automatically — the app self-exits after work hours -->
     <key>KeepAlive</key>
     <false/>
 
@@ -124,64 +479,153 @@ write_plist() {
 PLIST
 }
 
-agent_is_loaded() {
-    launchctl list "$LABEL" &>/dev/null
-}
-
-# ── Commands ──────────────────────────────────────────────────────────────────
-
-cmd_install() {
-    require_uv
-
-    # Verify the project looks sane before installing
-    if [[ ! -f "${PROJECT_ROOT}/pyproject.toml" ]]; then
-        red "Error: pyproject.toml not found in ${PROJECT_ROOT}"
-        red "Run this script from inside the deskghost repository."
-        exit 1
-    fi
-
-    # Unload stale agent if present
-    if agent_is_loaded; then
-        yellow "Existing agent found — reloading..."
-        launchctl bootout "gui/$(id -u)" "$PLIST_DST" 2>/dev/null || true
-    fi
-
-    write_plist
-    launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"
-
-    # Resolve the real Python binary (follow symlinks) so we can show the
-    # user exactly which path to paste into the Accessibility picker.
-    local PY_BIN
-    PY_BIN="$("$UV_PATH" run --no-env-file python -c 'import os, sys; print(os.path.realpath(sys.executable))' 2>/dev/null || echo "(unknown — run: uv run python -c 'import os,sys; print(os.path.realpath(sys.executable))')")"
+print_install_summary() {
+    local mode="$1"
+    local runtime_target="${2:-}"
 
     green "LaunchAgent installed."
+    green "  mode      : ${mode}"
     green "  plist     : ${PLIST_DST}"
-    green "  uv        : ${UV_PATH}"
     green "  project   : ${PROJECT_ROOT}"
     green "  logs      : ${LOG_DIR}"
+    if [[ "$mode" == "source" ]]; then
+        green "  uv        : ${UV_PATH}"
+    else
+        green "  runtime   : ${runtime_target}"
+    fi
     green "DeskGhost will start at login and configured schedule start times (local clock)."
     yellow "Configured local triggers:"
     while IFS= read -r line; do
         yellow "  ${line}"
     done <<< "$(read_trigger_entries_pretty)"
+}
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+
+cmd_build() {
+    ensure_macos
+    require_uv
+    assert_project_root
+
+    mkdir -p "$BUILD_DIR"
+
+    yellow "Syncing dependencies..."
+    "$UV_PATH" sync --project "$PROJECT_ROOT"
+
+    yellow "Building macOS app bundle with Nuitka..."
+    (
+        cd "$PROJECT_ROOT"
+        "$UV_PATH" run --project "$PROJECT_ROOT" --with nuitka python -m nuitka \
+            --standalone \
+            --macos-create-app-bundle \
+            --output-dir="$BUILD_DIR" \
+            --output-filename=DeskGhost \
+            --product-name="DeskGhost" \
+            --include-package=deskghost \
+            --include-data-files=conf/config.yaml=conf/config.yaml \
+            src/deskghost/main.py
+    )
+
+    local app_path dist_path app_exe
+    app_path="$(detect_app_bundle)"
+    dist_path="$(find "$BUILD_DIR" -maxdepth 1 -type d -name '*.dist' | head -n 1 || true)"
+
+    if [[ -z "$app_path" ]]; then
+        red "Build finished but no .app bundle was found under ${BUILD_DIR}."
+        exit 1
+    fi
+
+    if [[ -x "$app_path/Contents/MacOS/DeskGhost" ]]; then
+        app_exe="$app_path/Contents/MacOS/DeskGhost"
+    else
+        app_exe="$(find "$app_path/Contents/MacOS" -maxdepth 1 -type f ! -name '*.so' ! -name '*.dylib' | head -n 1 || true)"
+    fi
+
+    green "Build complete."
+    yellow "Outputs:"
+    yellow "  ${app_path}"
+    [[ -n "$dist_path" ]] && yellow "  ${dist_path}"
     echo ""
-    yellow "────────────────────────────────────────────────────────"
-    yellow "  ACTION REQUIRED — Accessibility permission"
-    yellow "  DeskGhost requires macOS Accessibility permission so that"
-    yellow "  CGEventPost can inject HID events to reset the idle timer."
-    yellow "  Without it, Teams (and similar apps) will still go idle."
-    yellow ""
-    yellow "  1. Open:  System Settings → Privacy & Security → Accessibility"
-    yellow "  2. Click the lock to make changes, then click  +"
-    yellow "  3. In the file picker press Cmd+Shift+G (Go to Folder) and paste:"
-    yellow "       ${PY_BIN}"
-    yellow "  4. Re-run:  bash scripts/setup.sh uninstall && bash scripts/setup.sh install"
-    yellow "────────────────────────────────────────────────────────"
-    echo ""
-    yellow "To test right now run:  bash scripts/setup.sh run-now"
+    yellow "Smoke test command:"
+    if [[ -n "$app_exe" ]]; then
+        yellow "  ${app_exe}"
+    else
+        yellow "  open ${app_path}"
+    fi
+}
+
+cmd_package() {
+    ensure_macos
+    require_cmd ditto
+    assert_project_root
+
+    local app_path
+    app_path="$(detect_app_bundle)"
+    if [[ -z "$app_path" ]]; then
+        red "No .app bundle found under ${BUILD_DIR}."
+        yellow "Build first: bash scripts/setup.sh build"
+        exit 1
+    fi
+
+    local version artifact zip_path
+    version="$(read_version)"
+    mkdir -p "$RELEASE_DIR"
+    artifact="DeskGhost-macos-v${version}.zip"
+    zip_path="${RELEASE_DIR}/${artifact}"
+
+    rm -f "$zip_path"
+    ditto -c -k --sequesterRsrc --keepParent "$app_path" "$zip_path"
+
+    green "Packaging complete."
+    yellow "App bundle : ${app_path}"
+    yellow "Artifact   : ${zip_path}"
+}
+
+cmd_install_source() {
+    ensure_macos
+    require_uv
+    assert_project_root
+
+    if agent_is_loaded; then
+        yellow "Existing agent found — reloading..."
+        launchctl bootout "gui/$(id -u)" "$PLIST_DST" 2>/dev/null || true
+    fi
+
+    write_plist "source"
+    launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"
+
+    print_install_summary "source"
+    maybe_prompt_for_ax "source"
+    yellow "To test right now run: bash scripts/setup.sh run-now-source"
+}
+
+cmd_install_packaged() {
+    ensure_macos
+    require_uv
+    assert_project_root
+
+    local binary_path
+    binary_path="$(resolve_packaged_binary "${1:-}")"
+
+    if agent_is_loaded; then
+        yellow "Existing agent found — reloading..."
+        launchctl bootout "gui/$(id -u)" "$PLIST_DST" 2>/dev/null || true
+    fi
+
+    write_plist "packaged" "$binary_path"
+    launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"
+
+    print_install_summary "packaged" "$binary_path"
+    maybe_prompt_for_ax "packaged" "$binary_path"
+    yellow "To test right now run: bash scripts/setup.sh run-now-packaged"
 }
 
 cmd_uninstall() {
+    local installed_mode="unknown"
+    if [[ -f "$PLIST_DST" ]]; then
+        installed_mode="$(detect_installed_mode)"
+    fi
+
     if agent_is_loaded; then
         launchctl bootout "gui/$(id -u)" "$PLIST_DST"
         green "LaunchAgent unloaded."
@@ -195,13 +639,28 @@ cmd_uninstall() {
     else
         yellow "Plist not found (already removed?)."
     fi
+
+    if [[ "$installed_mode" == "packaged" ]]; then
+        yellow "Packaged install detected. Removing build artifacts..."
+        remove_build_outputs
+    fi
 }
 
-cmd_run_now() {
+cmd_run_now_source() {
     require_uv
-    green "Starting DeskGhost now (Ctrl+C to stop)..."
+    assert_project_root
+    maybe_prompt_for_ax "source"
+    green "Starting DeskGhost now in source mode (Ctrl+C to stop)..."
     cd "$PROJECT_ROOT"
     exec "$UV_PATH" run deskghost
+}
+
+cmd_run_now_packaged() {
+    local binary_path
+    binary_path="$(resolve_packaged_binary "${1:-}")"
+    maybe_prompt_for_ax "packaged" "$binary_path"
+    green "Starting DeskGhost now in packaged mode (Ctrl+C to stop)..."
+    exec "$binary_path"
 }
 
 cmd_status() {
@@ -210,7 +669,7 @@ cmd_status() {
         launchctl list "$LABEL"
     else
         red "Agent is NOT loaded."
-        yellow "Run:  bash scripts/setup.sh install"
+        yellow "Run: bash scripts/setup.sh install-source"
     fi
 }
 
@@ -235,8 +694,6 @@ cmd_clean() {
     local LOG_FILE="${LOG_DIR}/deskghost.log"
     local LOG_FILE_1="${LOG_DIR}/deskghost.log.1"
 
-    # ── Discover what exists ───────────────────────────────────────────────────
-
     local pid=""
     local pid_alive=false
 
@@ -251,7 +708,6 @@ cmd_clean() {
         fi
     fi
 
-    # Build the list of actions to display
     local actions=()
     local has_work=false
 
@@ -260,7 +716,7 @@ cmd_clean() {
         has_work=true
     fi
 
-    for f in "$LOG_FILE" "$LOG_FILE_1"; do
+    for f in "$LOG_FILE" "$LOG_FILE_1" "$STDOUT_LOG" "$STDERR_LOG"; do
         if [[ -f "$f" ]]; then
             local size
             size="$(du -sh "$f" 2>/dev/null | cut -f1)"
@@ -269,23 +725,27 @@ cmd_clean() {
         fi
     done
 
+    for d in "$BUILD_DIR" "$RELEASE_DIR"; do
+        if [[ -d "$d" ]]; then
+            local size
+            size="$(du -sh "$d" 2>/dev/null | cut -f1)"
+            actions+=("  [delete] ${d}  (${size})")
+            has_work=true
+        fi
+    done
+
     if [[ -f "$LOCK_FILE" ]]; then
         if [[ "$pid_alive" == false ]]; then
-            # Stale or unreadable PID — delete silently without prompting
             rm -f "$LOCK_FILE"
         else
             actions+=("  [delete] ${LOCK_FILE}")
         fi
     fi
 
-    # ── Nothing to do ─────────────────────────────────────────────────────────
-
     if [[ "$has_work" == false ]]; then
         green "Nothing to clean."
         return 0
     fi
-
-    # ── Show summary and prompt ────────────────────────────────────────────────
 
     yellow "The following actions will be taken:"
     for action in "${actions[@]}"; do
@@ -293,6 +753,7 @@ cmd_clean() {
     done
     echo ""
     printf "Proceed? [y/N] "
+    local reply
     read -r reply
     echo ""
 
@@ -301,11 +762,8 @@ cmd_clean() {
         return 0
     fi
 
-    # ── Execute ───────────────────────────────────────────────────────────────
-
     if [[ "$pid_alive" == true ]]; then
         kill -TERM "$pid" 2>/dev/null || true
-        # Wait up to 3 seconds for graceful exit, then SIGKILL
         local waited=0
         while kill -0 "$pid" 2>/dev/null && (( waited < 3 )); do
             sleep 1
@@ -320,96 +778,154 @@ cmd_clean() {
         rm -f "$LOCK_FILE"
     fi
 
-    for f in "$LOG_FILE" "$LOG_FILE_1"; do
+    for f in "$LOG_FILE" "$LOG_FILE_1" "$STDOUT_LOG" "$STDERR_LOG"; do
         if [[ -f "$f" ]]; then
             rm -f "$f"
             green "Deleted: ${f}"
         fi
     done
+
+    for d in "$BUILD_DIR" "$RELEASE_DIR"; do
+        if [[ -d "$d" ]]; then
+            rm -rf "$d"
+            green "Deleted: ${d}"
+        fi
+    done
 }
 
-cmd_grant_ax() {
-    require_uv
+show_usage() {
+    cat <<'USAGE'
+Usage: bash scripts/setup.sh [action] [args]
 
-    # Check if already trusted
-    local TRUSTED
-    TRUSTED="$("$UV_PATH" run --project "$PROJECT_ROOT" python -c "
-import ctypes
-try:
-    lib = ctypes.CDLL('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
-    lib.AXIsProcessTrusted.restype = ctypes.c_bool
-    print('yes' if lib.AXIsProcessTrusted() else 'no')
-except Exception:
-    print('unknown')
-" 2>/dev/null)"
+Actions:
+  install / install-source
+  install-packaged [binary-or-app-path]
+  build
+  package
+  run-now / run-now-source
+  run-now-packaged [binary-or-app-path]
+  grant-ax [auto|source|packaged] [binary-or-app-path]
+  ax-status [auto|source|packaged] [binary-or-app-path]
+  status
+  logs
+  clean
+  uninstall
+  help
 
-    if [[ "$TRUSTED" == "yes" ]]; then
-        green "Accessibility permission is already granted."
-        green "Re-run to apply: bash scripts/setup.sh uninstall && bash scripts/setup.sh install"
-        return 0
-    fi
+No args starts interactive mode.
+USAGE
+}
 
-    yellow "Requesting Accessibility permission..."
-    yellow "A macOS dialog will appear — click 'Open System Settings',"
-    yellow "then enable the toggle next to the entry."
-    echo ""
+interactive_menu() {
+    PROMPT_USER=1
 
-    # AXIsProcessTrustedWithOptions with prompt=true triggers the native macOS
-    # dialog that asks the user to grant Accessibility access.  This must be
-    # called from a process with a GUI session (terminal), not from the daemon.
-    "$UV_PATH" run --project "$PROJECT_ROOT" python - <<'PYEOF'
-import ctypes
+    while true; do
+        echo ""
+        yellow "DeskGhost macOS setup"
+        echo "  1) Install agent (source mode: uv run deskghost)"
+        echo "  2) Build app (Nuitka)"
+        echo "  3) Package built app (.zip)"
+        echo "  4) Install agent (packaged mode)"
+        echo "  5) Request Accessibility permission (source mode)"
+        echo "  6) Request Accessibility permission (packaged mode)"
+        echo "  7) Run now (source mode)"
+        echo "  8) Run now (packaged mode)"
+        echo "  9) Status"
+        echo " 10) Logs"
+        echo " 11) Clean"
+        echo " 12) Uninstall"
+        echo "  0) Exit"
+        printf "Choose an option [0-12]: "
 
-cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
-ax = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+        local choice
+        read -r choice
 
-# Build { kAXTrustedCheckOptionPrompt: kCFBooleanTrue } using CF type callbacks
-# so CoreFoundation can safely retain/describe the keys and values.
-key_cbs = ctypes.c_void_p.in_dll(cf, "kCFTypeDictionaryKeyCallBacks")
-val_cbs = ctypes.c_void_p.in_dll(cf, "kCFTypeDictionaryValueCallBacks")
-
-cf.CFStringCreateWithCString.restype = ctypes.c_void_p
-cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
-key = cf.CFStringCreateWithCString(None, b"AXTrustedCheckOptionPrompt", 0x08000100)
-
-cf_bool_true = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue")
-
-cf.CFDictionaryCreate.restype = ctypes.c_void_p
-cf.CFDictionaryCreate.argtypes = [
-    ctypes.c_void_p,
-    ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p),
-    ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p,
-]
-key_ptr = ctypes.c_void_p(key)
-val_ptr = ctypes.c_void_p(cf_bool_true.value)
-options = cf.CFDictionaryCreate(
-    None,
-    ctypes.byref(key_ptr), ctypes.byref(val_ptr), 1,
-    ctypes.addressof(key_cbs), ctypes.addressof(val_cbs),
-)
-
-ax.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
-ax.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
-ax.AXIsProcessTrustedWithOptions(options)
-PYEOF
-
-    echo ""
-    yellow "Once you have enabled the toggle, re-run:"
-    yellow "  bash scripts/setup.sh uninstall && bash scripts/setup.sh install"
+        case "$choice" in
+            1) cmd_install_source ;;
+            2) cmd_build ;;
+            3) cmd_package ;;
+            4)
+                printf "Binary/App path (leave empty to auto-detect): "
+                local path
+                read -r path
+                cmd_install_packaged "$path"
+                ;;
+            5) cmd_grant_ax source ;;
+            6)
+                printf "Binary/App path (leave empty to auto-detect): "
+                local path
+                read -r path
+                cmd_grant_ax packaged "$path"
+                ;;
+            7) cmd_run_now_source ;;
+            8)
+                printf "Binary/App path (leave empty to auto-detect): "
+                local path
+                read -r path
+                cmd_run_now_packaged "$path"
+                ;;
+            9) cmd_status ;;
+            10) cmd_logs ;;
+            11) cmd_clean ;;
+            12) cmd_uninstall ;;
+            0) break ;;
+            *) red "Invalid option. Choose 0-12." ;;
+        esac
+    done
 }
 
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
-case "${1:-}" in
-    install)   cmd_install   ;;
-    uninstall) cmd_uninstall ;;
-    run-now)   cmd_run_now   ;;
-    status)    cmd_status    ;;
-    logs)      cmd_logs      ;;
-    clean)     cmd_clean     ;;
-    grant-ax)  cmd_grant_ax  ;;
+action="${1:-}"
+
+if [[ -z "$action" ]]; then
+    interactive_menu
+    exit 0
+fi
+
+case "$action" in
+    install|install-source)
+        cmd_install_source
+        ;;
+    install-packaged)
+        cmd_install_packaged "${2:-}"
+        ;;
+    build)
+        cmd_build
+        ;;
+    package)
+        cmd_package
+        ;;
+    run-now|run-now-source)
+        cmd_run_now_source
+        ;;
+    run-now-packaged)
+        cmd_run_now_packaged "${2:-}"
+        ;;
+    grant-ax)
+        cmd_grant_ax "${2:-auto}" "${3:-}"
+        ;;
+    ax-status)
+        cmd_ax_status "${2:-auto}" "${3:-}"
+        ;;
+    status)
+        cmd_status
+        ;;
+    logs)
+        cmd_logs
+        ;;
+    clean)
+        cmd_clean
+        ;;
+    uninstall)
+        cmd_uninstall
+        ;;
+    help|-h|--help)
+        show_usage
+        ;;
     *)
-        echo "Usage: bash scripts/setup.sh [install|uninstall|run-now|status|logs|clean|grant-ax]"
+        red "Unknown action: $action"
+        show_usage
         exit 1
         ;;
 esac
