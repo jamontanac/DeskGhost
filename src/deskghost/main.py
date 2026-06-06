@@ -1,5 +1,4 @@
 import ctypes
-import os
 import sys
 import time
 
@@ -39,7 +38,82 @@ def _is_accessibility_trusted() -> bool:
         return True
 
 
+def _request_accessibility_permission() -> None:
+    """Ask macOS to show the Accessibility permission dialog for this process."""
+    if sys.platform == "win32":
+        return
+    try:
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        ax = ctypes.CDLL(
+            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+        )
+
+        key_cbs = ctypes.c_void_p.in_dll(cf, "kCFTypeDictionaryKeyCallBacks")
+        val_cbs = ctypes.c_void_p.in_dll(cf, "kCFTypeDictionaryValueCallBacks")
+
+        cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+        cf.CFStringCreateWithCString.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+        ]
+        key = cf.CFStringCreateWithCString(None, b"AXTrustedCheckOptionPrompt", 0x08000100)
+
+        cf_bool_true = ctypes.c_void_p.in_dll(cf, "kCFBooleanTrue")
+
+        cf.CFDictionaryCreate.restype = ctypes.c_void_p
+        cf.CFDictionaryCreate.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_long,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        key_ptr = ctypes.c_void_p(key)
+        val_ptr = ctypes.c_void_p(cf_bool_true.value)
+        options = cf.CFDictionaryCreate(
+            None,
+            ctypes.byref(key_ptr),
+            ctypes.byref(val_ptr),
+            1,
+            ctypes.addressof(key_cbs),
+            ctypes.addressof(val_cbs),
+        )
+
+        ax.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
+        ax.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
+        ax.AXIsProcessTrustedWithOptions(options)
+    except OSError:
+        return
+
+
+def _handle_cli_flags() -> int | None:
+    """Handle helper CLI flags used by setup scripts.
+
+    Flags:
+    - ``--ax-status``: prints trusted/not-trusted and exits (0 trusted, 1 not).
+    - ``--request-ax``: requests Accessibility permission and exits.
+    """
+    if "--ax-status" in sys.argv:
+        trusted = _is_accessibility_trusted()
+        print("trusted" if trusted else "not-trusted")
+        return 0 if trusted else 1
+
+    if "--request-ax" in sys.argv:
+        _request_accessibility_permission()
+        trusted = _is_accessibility_trusted()
+        print("trusted" if trusted else "not-trusted")
+        return 0 if trusted else 1
+
+    return None
+
+
 def main() -> int:
+    cli_result = _handle_cli_flags()
+    if cli_result is not None:
+        return cli_result
+
     with InstanceLock() as lock:
         if not lock:
             # Another instance is already running (e.g. machine woke from sleep
