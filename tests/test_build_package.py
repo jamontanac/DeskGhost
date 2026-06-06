@@ -61,6 +61,11 @@ class TestBuildPackageScriptContracts:
 
         assert re.search(r"\bcmd_build\(\)\s*\{", text)
         assert "--macos-create-app-bundle" in text
+        assert "--macos-app-icon=" in text
+        assert "iconutil -c icns" in text
+        assert "deskghost.icns" in text
+        assert "normalize_macos_bundle_name" in text
+        assert "DeskGhost.app" in text
         assert "--output-filename=DeskGhost" in text
         assert "--include-data-files=conf/config.yaml=conf/config.yaml" in text
 
@@ -80,6 +85,8 @@ class TestBuildPackageScriptContracts:
         text = _read_text(SETUP_PS1)
 
         assert re.search(r"\bfunction\s+Invoke-Build\s*\{", text)
+        assert "Resolve-WindowsBuildIcon" in text
+        assert "--windows-icon-from-ico=" in text
         assert "python -m nuitka" in text
         assert "--output-filename=DeskGhost.exe" in text
         assert "--include-data-files=conf/config.yaml=conf/config.yaml" in text

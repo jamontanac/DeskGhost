@@ -37,6 +37,7 @@ STDERR_LOG="${LOG_DIR}/stderr.log"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${PROJECT_ROOT}/build/macos"
 RELEASE_DIR="${PROJECT_ROOT}/build/release/macos"
+MEDIA_DIR="${PROJECT_ROOT}/media"
 
 PROMPT_USER=0
 
@@ -157,11 +158,97 @@ remove_build_outputs() {
     fi
 }
 
+resolve_macos_app_icon() {
+    local icon_icns="${MEDIA_DIR}/deskghost.icns"
+    local icon_png="${MEDIA_DIR}/deskghost.png"
+    local icon_jpg="${MEDIA_DIR}/deskghost.jpg"
+    local icon_jpeg="${MEDIA_DIR}/deskghost.jpeg"
+
+    if [[ -f "$icon_icns" ]]; then
+        echo "$icon_icns"
+        return 0
+    fi
+
+    local source_image=""
+    if [[ -f "$icon_png" ]]; then
+        source_image="$icon_png"
+    elif [[ -f "$icon_jpg" ]]; then
+        source_image="$icon_jpg"
+    elif [[ -f "$icon_jpeg" ]]; then
+        source_image="$icon_jpeg"
+    fi
+
+    if [[ -n "$source_image" ]]; then
+        local converted_icns="${BUILD_DIR}/assets/deskghost.icns"
+        local iconset_dir="${BUILD_DIR}/assets/deskghost.iconset"
+
+        if command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
+            mkdir -p "$(dirname "$converted_icns")"
+            rm -rf "$iconset_dir"
+            mkdir -p "$iconset_dir"
+
+            local size doubled
+            for size in 16 32 128 256 512; do
+                doubled=$((size * 2))
+                sips -z "$size" "$size" "$source_image" --out "${iconset_dir}/icon_${size}x${size}.png" >/dev/null
+                sips -z "$doubled" "$doubled" "$source_image" --out "${iconset_dir}/icon_${size}x${size}@2x.png" >/dev/null
+            done
+
+            iconutil -c icns "$iconset_dir" -o "$converted_icns" >/dev/null
+            if [[ -f "$converted_icns" ]]; then
+                echo "$converted_icns"
+                return 0
+            fi
+        fi
+
+        yellow "Could not convert icon to icns automatically."
+        yellow "Falling back to source image: ${source_image}"
+        yellow "If Nuitka fails, install imageio or provide media/deskghost.icns."
+        echo "$source_image"
+        return 0
+    fi
+
+    echo ""
+}
+
 detect_app_bundle() {
     if [[ ! -d "$BUILD_DIR" ]]; then
         return 0
     fi
+
+    if [[ -d "$BUILD_DIR/DeskGhost.app" ]]; then
+        echo "$BUILD_DIR/DeskGhost.app"
+        return 0
+    fi
+
+    if [[ -d "$BUILD_DIR/main.app" ]]; then
+        echo "$BUILD_DIR/main.app"
+        return 0
+    fi
+
     find "$BUILD_DIR" -maxdepth 1 -type d -name '*.app' | head -n 1 || true
+}
+
+normalize_macos_bundle_name() {
+    local app_path="$1"
+    local target_path="$BUILD_DIR/DeskGhost.app"
+
+    if [[ -z "$app_path" || ! -d "$app_path" ]]; then
+        echo "$app_path"
+        return 0
+    fi
+
+    if [[ "$app_path" == "$target_path" ]]; then
+        echo "$app_path"
+        return 0
+    fi
+
+    if [[ -d "$target_path" ]]; then
+        rm -rf "$target_path"
+    fi
+
+    mv "$app_path" "$target_path"
+    echo "$target_path"
 }
 
 find_packaged_binary() {
@@ -509,6 +596,17 @@ cmd_build() {
 
     mkdir -p "$BUILD_DIR"
 
+    local icon_path
+    local icon_arg
+    icon_path="$(resolve_macos_app_icon)"
+    if [[ -n "$icon_path" ]]; then
+        icon_arg="--macos-app-icon=${icon_path}"
+        yellow "Using macOS app icon: ${icon_path}"
+    else
+        icon_arg="--macos-app-icon=none"
+        yellow "No icon found at media/deskghost.(icns|png|jpg|jpeg); building without custom app icon."
+    fi
+
     yellow "Syncing dependencies..."
     "$UV_PATH" sync --project "$PROJECT_ROOT"
 
@@ -518,6 +616,7 @@ cmd_build() {
         "$UV_PATH" run --project "$PROJECT_ROOT" --with nuitka python -m nuitka \
             --standalone \
             --macos-create-app-bundle \
+            "$icon_arg" \
             --output-dir="$BUILD_DIR" \
             --output-filename=DeskGhost \
             --product-name="DeskGhost" \
@@ -534,6 +633,8 @@ cmd_build() {
         red "Build finished but no .app bundle was found under ${BUILD_DIR}."
         exit 1
     fi
+
+    app_path="$(normalize_macos_bundle_name "$app_path")"
 
     if [[ -x "$app_path/Contents/MacOS/DeskGhost" ]]; then
         app_exe="$app_path/Contents/MacOS/DeskGhost"

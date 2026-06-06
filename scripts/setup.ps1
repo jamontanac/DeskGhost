@@ -48,6 +48,7 @@ $StderrLog  = Join-Path $LogDir "stderr.log"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BuildDir    = Join-Path $ProjectRoot "build\windows"
 $ReleaseDir  = Join-Path $ProjectRoot "build\release\windows"
+$MediaDir    = Join-Path $ProjectRoot "media"
 
 $script:PromptUser = $false
 
@@ -209,6 +210,27 @@ function Find-PackagedBinary {
     return $null
 }
 
+function Resolve-WindowsBuildIcon {
+    $icoPath = Join-Path $MediaDir "deskghost.ico"
+    if (Test-Path $icoPath) {
+        return (Resolve-Path $icoPath).Path
+    }
+
+    $pngPath = Join-Path $MediaDir "deskghost.png"
+    if (Test-Path $pngPath) {
+        return (Resolve-Path $pngPath).Path
+    }
+
+    $jpgPath = Join-Path $MediaDir "deskghost.jpg"
+    $jpegPath = Join-Path $MediaDir "deskghost.jpeg"
+    if ((Test-Path $jpgPath) -or (Test-Path $jpegPath)) {
+        Write-Yellow "Found JPG logo in media/, but Windows icon build expects deskghost.png or deskghost.ico."
+        Write-Yellow "Create media\\deskghost.png (recommended) to embed the icon in DeskGhost.exe."
+    }
+
+    return $null
+}
+
 function Resolve-PackagedBinary {
     param([string]$Hint)
 
@@ -344,18 +366,27 @@ function Invoke-Build {
     Write-Yellow "Syncing dependencies..."
     & $uvPath sync --project $ProjectRoot
 
+    $nuitkaArgs = @(
+        "--standalone",
+        "--output-dir=$BuildDir",
+        "--output-filename=DeskGhost.exe",
+        "--company-name=DeskGhost",
+        "--product-name=DeskGhost",
+        "--include-package=deskghost",
+        "--include-data-files=conf/config.yaml=conf/config.yaml",
+        "src/deskghost/main.py"
+    )
+
+    $iconPath = Resolve-WindowsBuildIcon
+    if (-not [string]::IsNullOrWhiteSpace($iconPath)) {
+        Write-Yellow "Using Windows executable icon: $iconPath"
+        $nuitkaArgs += "--windows-icon-from-ico=$iconPath"
+    }
+
     Write-Yellow "Building Windows executable with Nuitka..."
     Push-Location $ProjectRoot
     try {
-        & $uvPath run --project $ProjectRoot --with nuitka python -m nuitka `
-            --standalone `
-            --output-dir=$BuildDir `
-            --output-filename=DeskGhost.exe `
-            --company-name="DeskGhost" `
-            --product-name="DeskGhost" `
-            --include-package=deskghost `
-            --include-data-files=conf/config.yaml=conf/config.yaml `
-            src/deskghost/main.py
+        & $uvPath run --project $ProjectRoot --with nuitka python -m nuitka @nuitkaArgs
     }
     finally {
         Pop-Location

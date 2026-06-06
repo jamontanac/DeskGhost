@@ -48,6 +48,29 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 irm https://astral.sh/uv/install.ps1 | iex
 ```
 
+## Build icon/logo formats (Nuitka)
+
+Nuitka accepts these icon formats:
+
+- macOS app bundle (`--macos-app-icon`): `.png` or `.icns`
+- Windows executable (`--windows-icon-from-ico`): `.ico` or `.png`
+
+The setup scripts look for logo files in `media/` using these names:
+
+- `media/deskghost.icns` (macOS preferred)
+- `media/deskghost.png` (works for both macOS and Windows builds)
+- `media/deskghost.jpg` or `media/deskghost.jpeg`
+
+On macOS, if the icon is PNG/JPG/JPEG, the build script auto-converts it to ICNS
+before invoking Nuitka, which avoids requiring Python `imageio` just for icon conversion.
+
+If you currently only have `media/deskghost.jpg` and want Windows icon embedding too,
+create a PNG copy:
+
+```bash
+sips -s format png media/deskghost.jpg --out media/deskghost.png
+```
+
 ## Troubleshooting and Restricted Environments
 
 ### Quick decision tree
