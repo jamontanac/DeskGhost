@@ -1,7 +1,10 @@
 import ctypes
+import os
+import signal
 import sys
 import time
 
+from deskghost.config import MANUAL_ALWAYS_ON
 from deskghost.lock import InstanceLock
 from deskghost.logger import ThrottledLogger, configure_file_logging, get_logger
 from deskghost.schedule import (
@@ -109,17 +112,121 @@ def _handle_cli_flags() -> int | None:
     return None
 
 
+def _runtime_cli_options() -> tuple[bool, bool]:
+    """Return (manual_mode, always_on_override) from runtime CLI flags.
+
+    --always-on implies --manual because it is a manual execution profile.
+    """
+    manual_mode = "--manual" in sys.argv
+    always_on_override = "--always-on" in sys.argv
+    if always_on_override:
+        manual_mode = True
+    return manual_mode, always_on_override
+
+
+def _is_process_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _terminate_existing_instance(pid: int, log) -> bool:
+    if pid == os.getpid():
+        log.error("Refusing to terminate current process during takeover.")
+        return False
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        log.error(f"Cannot terminate existing DeskGhost PID {pid}: permission denied.")
+        return False
+    except OSError as exc:
+        log.error(f"Cannot terminate existing DeskGhost PID {pid}: {exc}")
+        return False
+
+
+def _wait_for_lock_availability(timeout_seconds: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        with InstanceLock() as probe:
+            if probe:
+                return True
+        time.sleep(0.2)
+    return False
+
+
+def _attempt_manual_takeover(existing_pid: int | None, log) -> bool:
+    if existing_pid is None:
+        log.error(
+            "Manual always-on mode requested takeover, but the running PID is unknown. "
+            "Stop the existing instance manually and retry."
+        )
+        return False
+
+    log.warning(
+        f"Manual always-on mode is taking over from running DeskGhost PID {existing_pid}."
+    )
+
+    if not _terminate_existing_instance(existing_pid, log):
+        return False
+
+    if not _wait_for_lock_availability():
+        if _is_process_running(existing_pid):
+            log.error(
+                f"Takeover timed out waiting for DeskGhost PID {existing_pid} to exit."
+            )
+        else:
+            log.error("Takeover timed out waiting for DeskGhost lock release.")
+        return False
+
+    log.warning(
+        f"Manual always-on takeover completed. Replaced PID {existing_pid}."
+    )
+    return True
+
+
 def main() -> int:
     cli_result = _handle_cli_flags()
     if cli_result is not None:
         return cli_result
 
-    with InstanceLock() as lock:
-        if not lock:
+    manual_mode, always_on_override = _runtime_cli_options()
+    always_on_mode = always_on_override or (manual_mode and MANUAL_ALWAYS_ON)
+    takeover_attempts = 0
+
+    while True:
+        with InstanceLock() as lock:
+            if lock:
+                return _run(always_on_mode=always_on_mode, manual_mode=manual_mode)
+
             # Another instance is already running (e.g. machine woke from sleep
             # while a previous session was still alive, and the scheduler or
-            # login item fired again).  Log the PID so the user can kill it manually.
+            # login item fired again).
             log = get_logger()
+
+            if always_on_mode and manual_mode:
+                if takeover_attempts >= 1:
+                    if lock.pid is not None:
+                        log.error(
+                            f"Could not acquire lock after takeover attempt. "
+                            f"DeskGhost PID {lock.pid} is still running."
+                        )
+                    else:
+                        log.error("Could not acquire lock after takeover attempt.")
+                    return 1
+
+                takeover_attempts += 1
+                if _attempt_manual_takeover(lock.pid, log):
+                    continue
+                return 1
+
             if lock.pid is not None:
                 log.warning(
                     f"DeskGhost already running (PID {lock.pid}). "
@@ -128,10 +235,9 @@ def main() -> int:
             else:
                 log.warning("DeskGhost already running (PID unknown). Lock file: ~/.deskghost/deskghost.lock")
             return 0
-        return _run()
 
 
-def _run() -> int:
+def _run(always_on_mode: bool = False, manual_mode: bool = False) -> int:
     log = get_logger()
     log_file = configure_file_logging()
     throttled = ThrottledLogger()
@@ -172,6 +278,12 @@ def _run() -> int:
         f"  Idle threshold : {IDLE_TIME_SECONDS}s  |  "
         f"Nudge interval : {MOVE_INTERVAL_SECONDS}s"
     )
+    if always_on_mode:
+        log.warning("  Manual always-on mode is active.")
+        log.warning("  Schedule and lunch windows are ignored.")
+        log.warning("  DeskGhost will stay active until stopped (Ctrl+C).")
+    elif manual_mode:
+        log.info("  Manual mode is active. Schedule and lunch windows still apply.")
     log.info(f"  Platform : {sys.platform}")
     log.info(f"  Log file : {log_file}")
     log.info("=" * 55)
@@ -193,12 +305,12 @@ def _run() -> int:
     try:
         while True:
             # 1. Outside work hours — exit cleanly
-            if not is_work_hours():
+            if not always_on_mode and not is_work_hours():
                 log.info("Outside work hours. Bot stopped.")
                 break
 
             # 2. Lunch break — keep display alive without simulating input
-            if is_lunch_time():
+            if not always_on_mode and is_lunch_time():
                 if not in_lunch:
                     log.info("Lunch break started. Preventing display sleep (Teams may go idle)...")
                     in_lunch = True
@@ -207,7 +319,7 @@ def _run() -> int:
                 time.sleep(MOVE_INTERVAL_SECONDS)
 
             # 3. Returning from lunch — release display assertion and reset idle
-            elif in_lunch:
+            elif in_lunch and not always_on_mode:
                 log.info("Lunch break ended. Releasing display assertion, resetting idle timer.")
                 watcher.allow_display_sleep()
                 watcher.reset_idle()

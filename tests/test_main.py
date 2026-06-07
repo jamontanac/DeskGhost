@@ -38,6 +38,28 @@ def _reload_main(fake_watcher: FakeWatcher, mocker, is_work: list, is_lunch: lis
     mocker.patch("deskghost.main.get_logger", return_value=MagicMock())
     mocker.patch("deskghost.main.ThrottledLogger", return_value=MagicMock())
     mocker.patch("deskghost.main.configure_file_logging", return_value="/fake/log")
+    mocker.patch("deskghost.main.sys.argv", ["deskghost"])
+    mocker.patch("deskghost.main.MANUAL_ALWAYS_ON", False)
+
+
+class _LockResult:
+    def __init__(self, acquired: bool, pid: int | None = None):
+        self._acquired = acquired
+        self.pid = pid
+
+    def __bool__(self) -> bool:
+        return self._acquired
+
+
+class _LockContext:
+    def __init__(self, result: _LockResult):
+        self._result = result
+
+    def __enter__(self):
+        return self._result
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +180,89 @@ class TestMainKeyboardInterrupt:
         import deskghost.main as main_mod
         main_mod.main()
         assert fake_watcher.cleanup_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Manual + always-on runtime mode
+# ---------------------------------------------------------------------------
+
+class TestMainManualAlwaysOn:
+    def test_always_on_flag_bypasses_schedule_and_lunch(self, fake_watcher, mocker, patch_instance_lock):
+        fake_watcher.set_idle_time(999.0)
+        mocker.patch("deskghost.main.ActivityWatcher", return_value=fake_watcher)
+        work_mock = mocker.patch("deskghost.main.is_work_hours")
+        lunch_mock = mocker.patch("deskghost.main.is_lunch_time")
+        mocker.patch("deskghost.main.time.sleep", side_effect=KeyboardInterrupt)
+        mocker.patch("deskghost.main.get_logger", return_value=MagicMock())
+        mocker.patch("deskghost.main.ThrottledLogger", return_value=MagicMock())
+        mocker.patch("deskghost.main.configure_file_logging", return_value="/fake/log")
+        mocker.patch("deskghost.main.sys.argv", ["deskghost", "--always-on"])
+        mocker.patch("deskghost.main.MANUAL_ALWAYS_ON", False)
+
+        import deskghost.main as main_mod
+
+        result = main_mod.main()
+        assert result == 130
+        assert fake_watcher.nudge_calls == 1
+        work_mock.assert_not_called()
+        lunch_mock.assert_not_called()
+
+    def test_manual_profile_uses_config_default_for_always_on(self, mocker, patch_instance_lock):
+        run_mock = mocker.patch("deskghost.main._run", return_value=0)
+        mocker.patch("deskghost.main.sys.argv", ["deskghost", "--manual"])
+        mocker.patch("deskghost.main.MANUAL_ALWAYS_ON", True)
+
+        import deskghost.main as main_mod
+
+        result = main_mod.main()
+        assert result == 0
+        run_mock.assert_called_once_with(always_on_mode=True, manual_mode=True)
+
+    def test_config_always_on_not_applied_without_manual_profile(self, mocker, patch_instance_lock):
+        run_mock = mocker.patch("deskghost.main._run", return_value=0)
+        mocker.patch("deskghost.main.sys.argv", ["deskghost"])
+        mocker.patch("deskghost.main.MANUAL_ALWAYS_ON", True)
+
+        import deskghost.main as main_mod
+
+        result = main_mod.main()
+        assert result == 0
+        run_mock.assert_called_once_with(always_on_mode=False, manual_mode=False)
+
+    def test_manual_always_on_attempts_takeover_then_starts(self, mocker):
+        lock_sequence = [
+            _LockContext(_LockResult(False, pid=4242)),
+            _LockContext(_LockResult(True)),
+        ]
+        mocker.patch("deskghost.main.InstanceLock", side_effect=lock_sequence)
+        takeover_mock = mocker.patch("deskghost.main._attempt_manual_takeover", return_value=True)
+        run_mock = mocker.patch("deskghost.main._run", return_value=0)
+        mocker.patch("deskghost.main.get_logger", return_value=MagicMock())
+        mocker.patch("deskghost.main.sys.argv", ["deskghost", "--always-on"])
+        mocker.patch("deskghost.main.MANUAL_ALWAYS_ON", False)
+
+        import deskghost.main as main_mod
+
+        result = main_mod.main()
+        assert result == 0
+        takeover_mock.assert_called_once()
+        assert takeover_mock.call_args.args[0] == 4242
+        run_mock.assert_called_once_with(always_on_mode=True, manual_mode=True)
+
+    def test_manual_always_on_returns_error_when_takeover_fails(self, mocker):
+        lock_sequence = [_LockContext(_LockResult(False, pid=4242))]
+        mocker.patch("deskghost.main.InstanceLock", side_effect=lock_sequence)
+        mocker.patch("deskghost.main._attempt_manual_takeover", return_value=False)
+        run_mock = mocker.patch("deskghost.main._run", return_value=0)
+        mocker.patch("deskghost.main.get_logger", return_value=MagicMock())
+        mocker.patch("deskghost.main.sys.argv", ["deskghost", "--always-on"])
+        mocker.patch("deskghost.main.MANUAL_ALWAYS_ON", False)
+
+        import deskghost.main as main_mod
+
+        result = main_mod.main()
+        assert result == 1
+        run_mock.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

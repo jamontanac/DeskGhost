@@ -144,6 +144,33 @@ uv run python src/deskghost/main.py
 
 If startup registration is blocked, keep a terminal open while running and stop with `Ctrl+C`.
 
+### Manual always-on mode (no scheduler)
+
+If you want DeskGhost to stay active indefinitely (ignoring work/lunch windows), use:
+
+```bash
+uv run deskghost --always-on
+```
+
+You can also enable always-on as a manual default in `conf/config.yaml`:
+
+```yaml
+manual:
+  always_on: true
+```
+
+Then launch with:
+
+```bash
+uv run deskghost --manual
+```
+
+Behavior notes:
+
+1. Manual always-on mode ignores `schedule` and `lunch` windows.
+2. If another DeskGhost instance is running, manual always-on attempts a safe takeover and replaces it.
+3. This mode does not require LaunchAgent / Task Scheduler registration.
+
 ### Log collection for support
 
 Collect these files:
@@ -170,6 +197,9 @@ Edit that file and re-run `install-source` to apply changes — no Python editin
 nudge:
   idle_time_seconds: 120       # how long idle before nudging starts
   move_interval_seconds: 5     # seconds between nudges while idle
+
+manual:
+  always_on: false             # only applies when launched with --manual/--always-on
 
 schedule:
   work_start: "08:00"          # base start time
@@ -198,6 +228,7 @@ Rule precedence:
 - `enabled: false` disables that day even if it is in `work_days`.
 - `enabled: true` enables that day even if it is not in `work_days`.
 - If only one time bound is overridden, the other bound comes from base schedule.
+- `manual.always_on` is only used in manual profile launches (`--manual` or `--always-on`).
 
 Timezone behavior:
 
