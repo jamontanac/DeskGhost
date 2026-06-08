@@ -381,6 +381,10 @@ function Invoke-Build {
     Assert-ProjectRoot
     $metadataVersion = Get-WindowsMetadataVersion
 
+    if (($env:CI -eq "true") -and -not (Get-Command depends.exe -ErrorAction SilentlyContinue)) {
+        throw "Dependency Walker (depends.exe) is required for Windows standalone Nuitka builds in CI. Ensure the workflow installs it before running .\scripts\setup.ps1 build."
+    }
+
     New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 
     Write-Yellow "Syncing dependencies..."
