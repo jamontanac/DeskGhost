@@ -93,7 +93,7 @@ class ActivityWatcher:
         lii = _LASTINPUTINFO()
         lii.cbSize = ctypes.sizeof(_LASTINPUTINFO)
         self._user32.GetLastInputInfo(lii)
-        elapsed_ms = int(self._kernel32.GetTickCount()) - int(lii.dwTime)
+        elapsed_ms = (int(self._kernel32.GetTickCount()) - int(lii.dwTime)) & 0xFFFFFFFF
         return max(0, elapsed_ms) / 1000.0
 
     def reset_idle(self) -> None:
