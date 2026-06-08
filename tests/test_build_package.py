@@ -86,8 +86,9 @@ class TestBuildPackageScriptContracts:
 
         assert re.search(r"\bfunction\s+Invoke-Build\s*\{", text)
         assert "Resolve-WindowsBuildIcon" in text
+        assert "Non-ICO icon detected. Adding imageio" in text
         assert "--windows-icon-from-ico=" in text
-        assert "python -m nuitka" in text
+        assert '"python", "-m", "nuitka"' in text
         assert "--output-filename=DeskGhost.exe" in text
         assert "--file-version=$metadataVersion" in text
         assert "--product-version=$metadataVersion" in text

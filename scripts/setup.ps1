@@ -385,6 +385,9 @@ function Invoke-Build {
 
     Write-Yellow "Syncing dependencies..."
     & $uvPath sync --project $ProjectRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "uv sync failed with exit code $LASTEXITCODE."
+    }
 
     $nuitkaArgs = @(
         "--standalone",
@@ -405,10 +408,32 @@ function Invoke-Build {
         $nuitkaArgs += "--windows-icon-from-ico=$iconPath"
     }
 
+    $uvRunArgs = @(
+        "run",
+        "--project",
+        $ProjectRoot,
+        "--with",
+        "nuitka"
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($iconPath)) {
+        $iconExt = [System.IO.Path]::GetExtension($iconPath).ToLowerInvariant()
+        if ($iconExt -ne ".ico") {
+            Write-Yellow "Non-ICO icon detected. Adding imageio so Nuitka can convert icon formats automatically."
+            $uvRunArgs += @("--with", "imageio")
+        }
+    }
+
+    $uvRunArgs += @("python", "-m", "nuitka")
+    $uvRunArgs += $nuitkaArgs
+
     Write-Yellow "Building Windows executable with Nuitka..."
     Push-Location $ProjectRoot
     try {
-        & $uvPath run --project $ProjectRoot --with nuitka python -m nuitka @nuitkaArgs
+        & $uvPath @uvRunArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "Nuitka build failed with exit code $LASTEXITCODE."
+        }
     }
     finally {
         Pop-Location
