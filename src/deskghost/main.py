@@ -51,8 +51,11 @@ def _request_accessibility_permission() -> None:
             "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
         )
 
-        key_cbs = ctypes.c_void_p.in_dll(cf, "kCFTypeDictionaryKeyCallBacks")
-        val_cbs = ctypes.c_void_p.in_dll(cf, "kCFTypeDictionaryValueCallBacks")
+        class _CFDictionaryCallBacks(ctypes.Structure):
+            _fields_ = [("_opaque", ctypes.c_uint8 * 64)]
+
+        key_cbs = _CFDictionaryCallBacks.in_dll(cf, "kCFTypeDictionaryKeyCallBacks")
+        val_cbs = _CFDictionaryCallBacks.in_dll(cf, "kCFTypeDictionaryValueCallBacks")
 
         cf.CFStringCreateWithCString.restype = ctypes.c_void_p
         cf.CFStringCreateWithCString.argtypes = [
