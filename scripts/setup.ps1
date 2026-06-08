@@ -404,6 +404,7 @@ function Invoke-Build {
         "--product-version=$metadataVersion",
         "--include-package=deskghost",
         "--include-data-files=conf/config.yaml=conf/config.yaml",
+        "--include-data-files=pyproject.toml=pyproject.toml",
         "src/deskghost/main.py"
     )
 
