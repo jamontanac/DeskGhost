@@ -89,6 +89,8 @@ class TestBuildPackageScriptContracts:
         assert "--windows-icon-from-ico=" in text
         assert "python -m nuitka" in text
         assert "--output-filename=DeskGhost.exe" in text
+        assert "--file-version=$metadataVersion" in text
+        assert "--product-version=$metadataVersion" in text
         assert "--include-data-files=conf/config.yaml=conf/config.yaml" in text
 
     def test_windows_package_contract(self):

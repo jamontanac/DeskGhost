@@ -137,6 +137,25 @@ function Get-Version {
     }
 }
 
+function Get-WindowsMetadataVersion {
+    $rawVersion = Get-Version
+    $numericParts = @([regex]::Matches($rawVersion, '\d+') | ForEach-Object { [int]$_.Value })
+
+    if ($numericParts.Count -eq 0) {
+        return "0.0.0.0"
+    }
+
+    while ($numericParts.Count -lt 4) {
+        $numericParts += 0
+    }
+
+    if ($numericParts.Count -gt 4) {
+        $numericParts = $numericParts[0..3]
+    }
+
+    return ($numericParts -join ".")
+}
+
 function Get-TriggerEntries {
     param([string]$UvPath)
 
@@ -360,6 +379,7 @@ function Register-DeskGhostTask {
 function Invoke-Build {
     $uvPath = Get-UvPath
     Assert-ProjectRoot
+    $metadataVersion = Get-WindowsMetadataVersion
 
     New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 
@@ -372,6 +392,8 @@ function Invoke-Build {
         "--output-filename=DeskGhost.exe",
         "--company-name=DeskGhost",
         "--product-name=DeskGhost",
+        "--file-version=$metadataVersion",
+        "--product-version=$metadataVersion",
         "--include-package=deskghost",
         "--include-data-files=conf/config.yaml=conf/config.yaml",
         "src/deskghost/main.py"
