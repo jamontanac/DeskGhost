@@ -57,6 +57,15 @@ class InstanceLock:
             # clobber the running instance PID when contention occurs.
             self._path.touch(exist_ok=True)
             self._fh = open(self._path, "r+b")  # noqa: WPS515
+
+            # msvcrt.locking() expects a byte range to exist. Seed byte 0 when
+            # the file is empty so lock/unlock calls are stable on Windows.
+            if sys.platform == "win32":
+                self._fh.seek(0, os.SEEK_END)
+                if self._fh.tell() == 0:
+                    self._fh.write(b"0")
+                    self._fh.flush()
+
             self._fh.seek(0)
             _acquire_exclusive(self._fh)
             # Store our PID so other instances can read it

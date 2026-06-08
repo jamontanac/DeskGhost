@@ -984,6 +984,11 @@ if [[ -z "$action" ]]; then
     exit 0
 fi
 
+if [[ "$action" == "help" || "$action" == "-h" || "$action" == "--help" ]]; then
+    show_usage
+    exit 0
+fi
+
 case "$action" in
     install|install-source)
         cmd_install_source
@@ -1020,9 +1025,6 @@ case "$action" in
         ;;
     uninstall)
         cmd_uninstall
-        ;;
-    help|-h|--help)
-        show_usage
         ;;
     *)
         red "Unknown action: $action"
