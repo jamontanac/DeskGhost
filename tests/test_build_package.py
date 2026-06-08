@@ -103,6 +103,7 @@ class TestBuildPackageScriptContracts:
 class TestBuildPackageHelpDispatch:
     """Runnable checks that help output includes build/package commands."""
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="macOS shell helper check is not runnable on Windows")
     def test_macos_help_lists_build_and_package(self):
         result = _run(["bash", "scripts/setup.sh", "help"])
         assert result.returncode == 0, result.stderr

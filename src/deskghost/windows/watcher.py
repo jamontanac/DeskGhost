@@ -1,6 +1,8 @@
 import ctypes
 import ctypes.wintypes
 
+_WINDLL = getattr(ctypes, "windll", None)
+
 # ── SetThreadExecutionState flags ─────────────────────────────────────────────
 _ES_CONTINUOUS       = 0x80000000
 _ES_SYSTEM_REQUIRED  = 0x00000001
@@ -57,13 +59,27 @@ class ActivityWatcher:
     """
 
     def __init__(self) -> None:
-        self._user32   = ctypes.windll.user32
-        self._kernel32 = ctypes.windll.kernel32
+        if _WINDLL is None:
+            raise RuntimeError("Windows APIs are unavailable on this platform")
+
+        self._user32 = _WINDLL.user32
+        self._kernel32 = _WINDLL.kernel32
+        self._configure_ctypes_signatures()
 
         # Prevent system and display sleep for the lifetime of this watcher
         self._kernel32.SetThreadExecutionState(
             _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED | _ES_DISPLAY_REQUIRED
         )
+
+    def _configure_ctypes_signatures(self) -> None:
+        self._user32.GetLastInputInfo.argtypes = [ctypes.POINTER(_LASTINPUTINFO)]
+        self._user32.GetLastInputInfo.restype = ctypes.wintypes.BOOL
+        self._user32.SendInput.argtypes = [ctypes.c_uint, ctypes.POINTER(_INPUT), ctypes.c_int]
+        self._user32.SendInput.restype = ctypes.c_uint
+
+        self._kernel32.GetTickCount.restype = ctypes.c_ulong
+        self._kernel32.SetThreadExecutionState.argtypes = [ctypes.c_uint]
+        self._kernel32.SetThreadExecutionState.restype = ctypes.c_uint
 
     # ── Idle detection ────────────────────────────────────────────────────────
 
@@ -74,9 +90,10 @@ class ActivityWatcher:
         ``CGEventSourceSecondsSinceLastEventType``.  No listener threads or
         special permissions required.
         """
-        lii = _LASTINPUTINFO(ctypes.sizeof(_LASTINPUTINFO))
-        self._user32.GetLastInputInfo(ctypes.byref(lii))
-        elapsed_ms = self._kernel32.GetTickCount() - lii.dwTime
+        lii = _LASTINPUTINFO()
+        lii.cbSize = ctypes.sizeof(_LASTINPUTINFO)
+        self._user32.GetLastInputInfo(lii)
+        elapsed_ms = int(self._kernel32.GetTickCount()) - int(lii.dwTime)
         return max(0, elapsed_ms) / 1000.0
 
     def reset_idle(self) -> None:
@@ -87,6 +104,14 @@ class ActivityWatcher:
         ``nudge_mouse()`` already does.
         """
         self._send_zero_move()
+
+    def prevent_display_sleep(self) -> None:
+        self._kernel32.SetThreadExecutionState(
+            _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED | _ES_DISPLAY_REQUIRED
+        )
+
+    def allow_display_sleep(self) -> None:
+        self._kernel32.SetThreadExecutionState(_ES_CONTINUOUS)
 
     # ── Nudge ─────────────────────────────────────────────────────────────────
 
@@ -128,4 +153,4 @@ class ActivityWatcher:
 
     def cleanup(self) -> None:
         """Restore normal execution state."""
-        self._kernel32.SetThreadExecutionState(_ES_CONTINUOUS)
+        self.allow_display_sleep()

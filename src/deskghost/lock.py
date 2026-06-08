@@ -53,9 +53,15 @@ class InstanceLock:
     def __enter__(self) -> _LockResult:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self._fh = open(self._path, "wb")  # noqa: WPS515
+            # Do not truncate before the lock is acquired, otherwise we could
+            # clobber the running instance PID when contention occurs.
+            self._path.touch(exist_ok=True)
+            self._fh = open(self._path, "r+b")  # noqa: WPS515
+            self._fh.seek(0)
             _acquire_exclusive(self._fh)
             # Store our PID so other instances can read it
+            self._fh.seek(0)
+            self._fh.truncate()
             self._fh.write(str(os.getpid()).encode())
             self._fh.flush()
             return _LockResult(True)
@@ -93,9 +99,11 @@ if sys.platform == "win32":
     def _acquire_exclusive(fh: IO[bytes]) -> None:
         """Non-blocking exclusive lock via msvcrt.locking (Windows)."""
         # LK_NBLCK raises OSError immediately if the lock cannot be obtained.
+        fh.seek(0)
         msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
 
     def _release(fh: IO[bytes]) -> None:
+        fh.seek(0)
         msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
 
 else:
