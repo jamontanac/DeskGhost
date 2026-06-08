@@ -391,6 +391,7 @@ function Invoke-Build {
 
     $nuitkaArgs = @(
         "--standalone",
+        "--assume-yes-for-downloads",
         "--output-dir=$BuildDir",
         "--output-filename=DeskGhost.exe",
         "--company-name=DeskGhost",
