@@ -93,6 +93,7 @@ def test_load_real_config_returns_all_keys():
         "DAY_OVERRIDES",
         "LUNCH_START_TIME",
         "LUNCH_DURATION_MINUTES",
+        "MANUAL_ALWAYS_ON",
     }
     assert expected_keys <= cfg.keys()
 
@@ -110,6 +111,7 @@ def test_load_code_default_values(tmp_path):
     assert cfg["DAY_OVERRIDES"] == {}
     assert cfg["LUNCH_START_TIME"] == (12, 30)
     assert cfg["LUNCH_DURATION_MINUTES"] == 60
+    assert cfg["MANUAL_ALWAYS_ON"] is False
 
 
 def test_load_real_config_types():
@@ -124,6 +126,7 @@ def test_load_real_config_types():
     assert isinstance(cfg["DAY_OVERRIDES"], dict)
     assert isinstance(cfg["LUNCH_START_TIME"], tuple)
     assert isinstance(cfg["LUNCH_DURATION_MINUTES"], int)
+    assert isinstance(cfg["MANUAL_ALWAYS_ON"], bool)
 
 
 # -- _load: custom path --------------------------------------------------------
@@ -139,24 +142,26 @@ def test_load_custom_path_overrides_values(tmp_path):
     cfg_file.write_text(
         textwrap.dedent(
             """\
-            nudge:
-              idle_time_seconds: 300
-              move_interval_seconds: 10
-            schedule:
-              work_start: "08:30"
-              work_end: "17:00"
-              work_days: [0, 1, 2, 3, 4]
-              timezone: "America/Bogota"
-              day_overrides:
-                4:
-                  work_end: "14:00"
-                5:
-                  enabled: true
-                  work_start: "09:00"
-                  work_end: "12:00"
-            lunch:
-              start: "13:00"
-              duration_minutes: 45
+nudge:
+    idle_time_seconds: 300
+    move_interval_seconds: 10
+manual:
+    always_on: true
+schedule:
+    work_start: "08:30"
+    work_end: "17:00"
+    work_days: [0, 1, 2, 3, 4]
+    timezone: "America/Bogota"
+    day_overrides:
+        4:
+            work_end: "14:00"
+        5:
+            enabled: true
+            work_start: "09:00"
+            work_end: "12:00"
+lunch:
+    start: "13:00"
+    duration_minutes: 45
             """
         )
     )
@@ -171,6 +176,7 @@ def test_load_custom_path_overrides_values(tmp_path):
     assert cfg["DAY_OVERRIDES"][5]["enabled"] is True
     assert cfg["LUNCH_START_TIME"] == (13, 0)
     assert cfg["LUNCH_DURATION_MINUTES"] == 45
+    assert cfg["MANUAL_ALWAYS_ON"] is True
 
 
 def test_load_invalid_idle_time_type_raises(tmp_path):
@@ -214,6 +220,20 @@ def test_load_invalid_time_string_raises(tmp_path):
         )
     )
     with pytest.raises(ValueError, match="schedule.work_start"):
+        _load(cfg_file)
+
+
+def test_load_invalid_manual_always_on_type_raises(tmp_path):
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        textwrap.dedent(
+            """\
+            manual:
+              always_on: "true"
+            """
+        )
+    )
+    with pytest.raises(ValueError, match="manual.always_on"):
         _load(cfg_file)
 
 
@@ -338,6 +358,7 @@ def test_module_constants_match_loaded_config():
     assert config_module.DAY_OVERRIDES == cfg["DAY_OVERRIDES"]
     assert config_module.LUNCH_START_TIME == cfg["LUNCH_START_TIME"]
     assert config_module.LUNCH_DURATION_MINUTES == cfg["LUNCH_DURATION_MINUTES"]
+    assert config_module.MANUAL_ALWAYS_ON == cfg["MANUAL_ALWAYS_ON"]
 
 
 def test_module_has_no_removed_constants():

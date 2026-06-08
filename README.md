@@ -16,7 +16,7 @@ decide whether to show you as Away. When you have been idle long enough it
 posts a synthetic input event that resets the timer, keeping Teams green.
 
 | Platform | Idle detection | Nudge mechanism |
-|---|---|---|
+| --- | --- | --- |
 | macOS | `CGEventSourceSecondsSinceLastEventType` (Quartz) | `CGEventCreateMouseEvent(kCGEventMouseMoved)` posted to `kCGHIDEventTap` — cursor does not move |
 | Windows | `GetLastInputInfo` (user32) | `SendInput` with `MOUSEEVENTF_MOVE` dx=0 dy=0 — cursor does not move |
 
@@ -33,7 +33,7 @@ does not lock while you are away from your desk.
 ## Requirements
 
 | Requirement | Notes |
-|---|---|
+| --- | --- |
 | Python 3.13+ | Pinned in `.python-version` |
 | [uv](https://docs.astral.sh/uv/) | Package manager — replaces pip/poetry |
 | macOS 12+ or Windows 10/11 | Other platforms are not supported |
@@ -48,17 +48,158 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 irm https://astral.sh/uv/install.ps1 | iex
 ```
 
+## Build icon/logo formats (Nuitka)
+
+Nuitka accepts these icon formats:
+
+- macOS app bundle (`--macos-app-icon`): `.png` or `.icns`
+- Windows executable (`--windows-icon-from-ico`): `.ico` or `.png`
+
+The setup scripts look for logo files in `media/` using these names:
+
+- `media/deskghost.icns` (macOS preferred)
+- `media/deskghost.png` (works for both macOS and Windows builds)
+- `media/deskghost.jpg` or `media/deskghost.jpeg`
+
+On macOS, if the icon is PNG/JPG/JPEG, the build script auto-converts it to ICNS
+before invoking Nuitka, which avoids requiring Python `imageio` just for icon conversion.
+
+If you currently only have `media/deskghost.jpg` and want Windows icon embedding too,
+create a PNG copy:
+
+```bash
+sips -s format png media/deskghost.jpg --out media/deskghost.png
+```
+
+## Troubleshooting and Restricted Environments
+
+### Quick decision tree
+
+1. Install and startup registration both work:
+Use installed mode (`install-source` or `install-packaged`).
+
+2. Install works but startup registration is blocked:
+Use manual run mode and start DeskGhost when needed.
+
+3. Install is blocked:
+Use packaged portable zip (if available) or source/manual mode.
+
+4. Python/uv is blocked:
+Use packaged runtime (if approved by policy) or request IT exception.
+
+### macOS common issues
+
+1. Accessibility not granted
+
+- Symptoms: logs show accessibility warnings and Teams still goes idle.
+- Fix:
+  - `bash scripts/setup.sh grant-ax source`
+  - or `bash scripts/setup.sh grant-ax packaged`
+  - then reinstall startup for your mode:
+    - source: `bash scripts/setup.sh uninstall && bash scripts/setup.sh install-source`
+    - packaged: `bash scripts/setup.sh uninstall && bash scripts/setup.sh install-packaged`
+
+1. LaunchAgent installed but not active
+
+- Check:
+  - `bash scripts/setup.sh status`
+  - `bash scripts/setup.sh logs`
+  - verify plist exists at `~/Library/LaunchAgents/com.deskghost.agent.plist`
+- Fix:
+  - `bash scripts/setup.sh uninstall`
+  - `bash scripts/setup.sh install-source`
+
+### Windows common issues
+
+1. PowerShell blocks setup script
+
+- Run:
+  - `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`
+
+1. Task Scheduler registration denied
+
+- Use manual run mode (no scheduler).
+- Request IT exception if startup automation is required.
+
+1. Antivirus/Defender/SmartScreen blocks execution
+
+- Prefer packaged artifacts from trusted releases.
+- Provide hash and publisher details to IT for allow-list review.
+- Use source/manual mode if approved by policy.
+
+### Manual fallback (no installer / no scheduler)
+
+macOS and Windows:
+
+```bash
+uv sync
+uv run deskghost
+```
+
+Alternative direct source entrypoint:
+
+```bash
+uv run python src/deskghost/main.py
+```
+
+If startup registration is blocked, keep a terminal open while running and stop with `Ctrl+C`.
+
+### Manual always-on mode (no scheduler)
+
+If you want DeskGhost to stay active indefinitely (ignoring work/lunch windows), use:
+
+```bash
+uv run deskghost --always-on
+```
+
+You can also enable always-on as a manual default in `conf/config.yaml`:
+
+```yaml
+manual:
+  always_on: true
+```
+
+Then launch with:
+
+```bash
+uv run deskghost --manual
+```
+
+Behavior notes:
+
+1. Manual always-on mode ignores `schedule` and `lunch` windows.
+2. If another DeskGhost instance is running, manual always-on attempts a safe takeover and replaces it.
+3. This mode does not require LaunchAgent / Task Scheduler registration.
+
+### Log collection for support
+
+Collect these files:
+
+- `~/.deskghost/logs/deskghost.log`
+- `~/.deskghost/logs/stdout.log`
+- `~/.deskghost/logs/stderr.log`
+
+Include:
+
+1. OS version
+2. How DeskGhost was started (source install / packaged install / manual)
+3. Exact error text
+4. Whether scheduler registration is allowed in your environment
+
 ---
 
 ## Configuration
 
 All tuneable values live in **`conf/config.yaml`** at the project root.
-Edit that file and re-run `install` to apply changes — no Python editing required.
+Edit that file and re-run `install-source` to apply changes — no Python editing required.
 
 ```yaml
 nudge:
   idle_time_seconds: 120       # how long idle before nudging starts
   move_interval_seconds: 5     # seconds between nudges while idle
+
+manual:
+  always_on: false             # only applies when launched with --manual/--always-on
 
 schedule:
   work_start: "08:00"          # base start time
@@ -87,14 +228,15 @@ Rule precedence:
 - `enabled: false` disables that day even if it is in `work_days`.
 - `enabled: true` enables that day even if it is not in `work_days`.
 - If only one time bound is overridden, the other bound comes from base schedule.
+- `manual.always_on` is only used in manual profile launches (`--manual` or `--always-on`).
 
 Timezone behavior:
 
 - Work and lunch checks run in `schedule.timezone` if set, otherwise local machine timezone.
 - Install scripts convert the effective schedule into local OS trigger times.
 - After any schedule change, re-run install:
-  - macOS: `bash scripts/setup.sh uninstall && bash scripts/setup.sh install`
-  - Windows: `.\scripts\setup.ps1 uninstall` then `.\scripts\setup.ps1 install`
+  - macOS: `bash scripts/setup.sh uninstall && bash scripts/setup.sh install-source`
+  - Windows: `.\scripts\setup.ps1 uninstall` then `.\scripts\setup.ps1 install-source`
 
 ---
 
@@ -127,7 +269,14 @@ stream. Without it the nudge runs silently but Teams will still go idle.
 executable printed in the startup warning, then reinstall:
 
 ```bash
-bash scripts/setup.sh uninstall && bash scripts/setup.sh install
+bash scripts/setup.sh grant-ax source
+bash scripts/setup.sh uninstall && bash scripts/setup.sh install-source
+```
+
+For packaged runtime mode, request permission against the packaged binary:
+
+```bash
+bash scripts/setup.sh grant-ax packaged
 ```
 
 ---
@@ -164,19 +313,33 @@ ever needed.
 # Make the script executable (one time only)
 chmod +x scripts/setup.sh
 
-# Register the LaunchAgent
-bash scripts/setup.sh install
+# Start interactive menu (recommended)
+bash scripts/setup.sh
+
+# Or register source-mode LaunchAgent directly
+bash scripts/setup.sh install-source
+
+# Register packaged-mode LaunchAgent directly
+bash scripts/setup.sh install-packaged
+
+# Build and package from unified script
+bash scripts/setup.sh build
+bash scripts/setup.sh package
 
 # Verify it is loaded
 bash scripts/setup.sh status
 
 # Test it right now without waiting for a scheduled trigger
-bash scripts/setup.sh run-now
+bash scripts/setup.sh run-now-source
 
 # View logs
 bash scripts/setup.sh logs
 
+# Clean runtime leftovers and local build artifacts (with confirmation)
+bash scripts/setup.sh clean
+
 # Remove the LaunchAgent
+# If currently installed in packaged mode, this also removes build/release artifacts.
 bash scripts/setup.sh uninstall
 ```
 
@@ -188,19 +351,33 @@ Logs go to `~/.deskghost/logs/`.
 Open **PowerShell** (no administrator rights needed):
 
 ```powershell
+# Start interactive menu (recommended)
+.\scripts\setup.ps1
+
 # Register the scheduled task
-.\scripts\setup.ps1 install
+.\scripts\setup.ps1 install-source
+
+# Register packaged-mode scheduled task
+.\scripts\setup.ps1 install-packaged
+
+# Build and package from unified script
+.\scripts\setup.ps1 build
+.\scripts\setup.ps1 package
 
 # Verify it is registered
 .\scripts\setup.ps1 status
 
 # Test it right now
-.\scripts\setup.ps1 run-now
+.\scripts\setup.ps1 run-now-source
 
 # View logs
 .\scripts\setup.ps1 logs
 
+# Clean runtime leftovers and local build artifacts (with confirmation)
+.\scripts\setup.ps1 clean
+
 # Remove the task
+# If currently installed in packaged mode, this also removes build/release artifacts.
 .\scripts\setup.ps1 uninstall
 ```
 
@@ -219,13 +396,13 @@ Logs go to `~/.deskghost/logs/`.
 
 Regardless of how DeskGhost is started, output is always written to:
 
-```
+```text
 ~/.deskghost/logs/deskghost.log
 ```
 
 When started via the scheduler, stdout and stderr are also captured to:
 
-```
+```text
 ~/.deskghost/logs/stdout.log
 ~/.deskghost/logs/stderr.log
 ```
@@ -236,7 +413,7 @@ Log format: `[HH:MM:SS] [LEVEL] message`
 
 ## Project structure
 
-```
+```text
 src/deskghost/
 ├── main.py          # entry point — detects OS and delegates
 ├── config.py        # loads conf/config.yaml and exposes typed constants
@@ -249,8 +426,8 @@ src/deskghost/
     └── watcher.py   # Windows: ctypes SendInput nudge, SetThreadExecutionState
 
 scripts/
-├── setup.sh         # macOS installer (launchd LaunchAgent)
-└── setup.ps1        # Windows installer (Task Scheduler)
+├── setup.sh         # macOS unified setup/build/package tool
+└── setup.ps1        # Windows unified setup/build/package tool
 
 conf/
 └── config.yaml      # all user-facing settings
@@ -285,8 +462,8 @@ scheduler integration is correctly configured. These tests **skip
 automatically** when the agent / task has not been installed on the current
 machine, so a clean development environment always produces a clean run.
 
-Once you have run `bash scripts/setup.sh install` (macOS) or
-`scripts\setup.ps1 install` (Windows), the install tests become active and
+Once you have run `bash scripts/setup.sh install-source` (macOS) or
+`scripts\setup.ps1 install-source` (Windows), the install tests become active and
 check that:
 
 - The plist / scheduled task file exists and is valid.
@@ -312,8 +489,9 @@ uv run pytest tests/test_install.py -v
   exclusively (`CGEvent` on macOS, `SendInput` on Windows). These are
   indistinguishable from the cursor sitting still, which means EDR tools
   (CrowdStrike, SentinelOne, etc.) have nothing behaviour-based to flag.
-- **Do not package this as a standalone `.exe`** using PyInstaller or similar
-  tools. Packed Python binaries that simulate input are near-certain to trigger
-  AV heuristics. Running via `uv run deskghost` from source is the safe approach.
+- If distributing binaries, prefer **Nuitka-built + code-signed** artifacts.
+  Unsigned or low-reputation binaries that simulate input are likely to trigger
+  AV/EDR heuristics; always keep the documented source/manual run path as a
+  fallback in restricted environments.
 - Use this tool at your own discretion and in accordance with your
   organisation's policies.

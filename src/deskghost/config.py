@@ -78,6 +78,14 @@ def _require_int(value: object, field: str, min_val: int = 1) -> int:
     return value
 
 
+def _require_bool(value: object, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"Config field '{field}' must be a boolean, got: {value!r}"
+        )
+    return value
+
+
 def _parse_weekday(value: object, field: str) -> int:
     if isinstance(value, bool):
         raise ValueError(f"Config field '{field}' must be a weekday integer 0-6, got: {value!r}")
@@ -233,6 +241,7 @@ def _load(path: Path | None = None) -> dict:
     nudge = _require_mapping(raw.get("nudge", {}), "nudge")
     schedule = _require_mapping(raw.get("schedule", {}), "schedule")
     lunch = _require_mapping(raw.get("lunch", {}), "lunch")
+    manual = _require_mapping(raw.get("manual", {}), "manual")
 
     work_start = _parse_hhmm(schedule.get("work_start", "07:00"), "schedule.work_start")
     work_end = _parse_hhmm(schedule.get("work_end", "18:00"), "schedule.work_end")
@@ -252,6 +261,7 @@ def _load(path: Path | None = None) -> dict:
         "DAY_OVERRIDES":          day_overrides,
         "LUNCH_START_TIME":       _parse_hhmm(lunch.get("start", "12:30"),             "lunch.start"),
         "LUNCH_DURATION_MINUTES": _require_int(lunch.get("duration_minutes", 60),      "lunch.duration_minutes"),
+        "MANUAL_ALWAYS_ON":       _require_bool(manual.get("always_on", False),         "manual.always_on"),
     }
 
 
@@ -269,6 +279,7 @@ SCHEDULE_TIMEZONE_LABEL: str            = _cfg["SCHEDULE_TIMEZONE_LABEL"]
 DAY_OVERRIDES:          dict[int, DayOverride] = _cfg["DAY_OVERRIDES"]
 LUNCH_START_TIME:       tuple[int, int] = _cfg["LUNCH_START_TIME"]
 LUNCH_DURATION_MINUTES: int             = _cfg["LUNCH_DURATION_MINUTES"]
+MANUAL_ALWAYS_ON:       bool            = _cfg["MANUAL_ALWAYS_ON"]
 
 
 def get_effective_day_schedule(weekday: int) -> tuple[bool, tuple[int, int], tuple[int, int]]:

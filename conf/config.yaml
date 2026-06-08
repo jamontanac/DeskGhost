@@ -1,8 +1,8 @@
 # DeskGhost configuration
 # ─────────────────────────────────────────────────────────────────────────────
 # Edit this file to tune behaviour, then:
-#   macOS   → bash scripts/setup.sh install     (re-registers the LaunchAgent)
-#   Windows → .\scripts\setup.ps1 install       (re-registers the Scheduled Task)
+#   macOS   → bash scripts/setup.sh install-source     (re-registers the LaunchAgent)
+#   Windows → .\scripts\setup.ps1 install-source       (re-registers the Scheduled Task)
 #
 # Scheduler triggers are derived from the effective schedule (base days,
 # per-day overrides, and optional timezone) and converted to local OS time
@@ -18,6 +18,12 @@ nudge:
 
     # Seconds between consecutive nudges while the user remains idle.
     move_interval_seconds: 5
+
+manual:
+    # When true, manual mode runs indefinitely using only nudge settings.
+    # This is only applied when launched with --manual or --always-on.
+    # In manual always-on mode, schedule and lunch windows are ignored.
+    always_on: false
 
 schedule:
     # HH:MM — base start of the work window.
